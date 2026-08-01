@@ -4,6 +4,7 @@ node_modules/
 .omo/
 .agents/
 AGENTS.md
+.commandcode/
 stdout.txt
 stderr.txt
 captured-requests/

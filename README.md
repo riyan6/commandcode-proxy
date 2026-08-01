@@ -2,18 +2,18 @@
 
 > [中文文档](README_zh.md)
 
-A reverse proxy that converts Command Code API to OpenAI / Anthropic compatible endpoints. Single file, zero external dependencies.
+A reverse proxy that converts Command Code API to OpenAI / Anthropic compatible endpoints. Node.js ESM with zero external dependencies.
 
-Built by analyzing official CLI v0.32.3 network traffic to accurately replicate the Command Code API request protocol.
+Built by analyzing the local `command-code@1.7.0` CLI bundle and aligning the Command Code API request protocol.
 
-**Features**: OpenAI Chat Completions + Anthropic Messages API | Streaming & non-streaming | Tool calling (tool_use) | Multimodal image input | Reasoning effort | Dynamic model list | Cache hit metrics | Client disconnect detection with upstream abort | Zero-output → 502 auto-retry | Consecutive timeout → 429 auto-retry | Privacy-aware logging
+**Features**: OpenAI Chat Completions + Anthropic Messages API | Streaming & non-streaming | Tool calling (tool_use) | Multimodal image input | Reasoning effort | Dynamic model list | Cache hit metrics | Client disconnect detection with upstream abort | Zero-output → 429 auto-retry | Consecutive timeout → 429 auto-retry | Privacy-aware logging
 
 **Community**: [Linux.do](https://linux.do) — a friendly Chinese tech community.
 
 ## Quick Start
 
 ```bash
-npm start        # Start (default http://0.0.0.0:3000)
+npm start        # Start (default http://0.0.0.0:3050)
 npm run dev      # Watch mode (auto-reload on file changes)
 ```
 
@@ -33,7 +33,9 @@ commandcode/
 ├── config.json         # Port / log path etc.
 ├── LICENSE             # MIT License
 ├── package.json        # npm start / npm run dev
-├── proxy.mjs           # Single-file proxy core (~1600 lines)
+├── proxy.mjs           # HTTP entrypoint and request orchestration
+├── src/                # Configuration, validation, state and CC client modules
+├── test/               # Built-in node:test integration tests
 ├── Dockerfile          # Container build (node:22-alpine)
 ├── docker-compose.yml  # Container orchestration
 ├── .dockerignore       # Build context exclusions
@@ -47,10 +49,19 @@ commandcode/
 
 | Field | Default | Description |
 |------|--------|-------------|
-| `port` | `3000` | Listen port |
+| `port` | `3050` | Listen port |
 | `host` | `0.0.0.0` | Listen address |
 | `apiBase` | `https://api.commandcode.ai` | CC API base URL |
+| `protocolVersion` | `1.7.0` | Protocol implementation baseline; does not control the version header |
+| `cliEnvironment` | `production` | `x-cli-environment` header |
+| `userAgent` | `cli` | CLI User-Agent |
 | `projectSlug` | `cc-proxy` | `x-project-slug` header |
+| `mode` | `interactive` | CC CLI request mode |
+| `permissionMode` | `standard` | CC permission mode |
+| `tasteLearningEnabled` | `false` | `x-taste-learning` switch |
+| `oauthEnforced` | `false` | `x-co-flag` switch |
+| `cmdZdr` | `false` | Send `x-cmd-zdr: 1` when enabled |
+| `fingerprintSalt` | `""` | Salt for stable per-key fingerprint derivation |
 | `logFile` | `""` | Log file path (empty = console only) |
 | `logLevel` | `info` | Log level |
 | `useProviderModels` | `true` | Dynamically fetch model list from Provider API |
@@ -63,9 +74,21 @@ commandcode/
 | `PORT` | `port` |
 | `HOST` | `host` |
 | `CC_API_BASE` | `apiBase` |
+| `COMMAND_CODE_PROTOCOL_VERSION` | `protocolVersion` |
+| `CC_CLI_ENVIRONMENT` | `cliEnvironment` |
+| `CC_USER_AGENT` | `userAgent` |
 | `PROJECT_SLUG` | `projectSlug` |
+| `CC_MODE` | `mode` |
+| `CC_PERMISSION_MODE` | `permissionMode` |
+| `CC_TASTE_LEARNING` | `tasteLearningEnabled` |
+| `CC_OAUTH_ENFORCED` | `oauthEnforced` |
+| `CMD_ZDR` | `cmdZdr` |
+| `OSS_PRIMARY_PROVIDER` | `ossPrimaryProvider` |
+| `FINGERPRINT_SALT` | `fingerprintSalt` |
 | `LOG_FILE` | `logFile` |
+| `LOG_LEVEL` | `logLevel` |
 | `CC_USE_PROVIDER_MODELS` | `useProviderModels` |
+| `MODEL_REFRESH_INTERVAL_MS` | `modelRefreshIntervalMs` |
 
 ## API Endpoints
 
@@ -78,7 +101,7 @@ OpenAI Chat Completions compatible. Supports streaming, non-streaming, tool call
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `model` | Yes | Model ID (see model list) |
-| `messages` | Yes | Conversation messages, supports `system/user/assistant/tool` roles |
+| `messages` | Yes | Conversation messages; `developer` maps to `system`, and legacy `function` maps to `tool` |
 | `max_tokens` | No | Max tokens to generate (default 64000) |
 | `stream` | No | SSE streaming (default false) |
 | `temperature` | No | Sampling temperature (0-2) |
@@ -332,13 +355,16 @@ print(message.content[0].text)
 
 ## Anti-Detection
 
-Based on analysis of official CLI v0.32.3 traffic:
+Based on analysis of the local `command-code@1.7.0` bundle:
 
 | Mechanism | Implementation |
 |-----------|---------------|
 | **Per-Key Session** | One session per API key, 12h expiry + 1h random jitter |
-| **Version** | `x-command-code-version` auto-fetched from npm registry (24h refresh) |
-| **CLI Envelope** | config/memory/taste/permissionMode/params/threadId |
+| **Protocol Baseline / Dynamic Header** | Request envelope is implemented against `1.7.0`; `x-command-code-version` refreshes from npm latest every 24h and falls back to `1.7.0` |
+| **CLI Envelope** | config/memory/taste/skills/permissionMode/mode/params/threadId |
+| **Tools & Images** | Latest wire format for tools, base64 images and mimeType |
+| **Stream Continuation** | Repeats `pause_turn` requests up to two times on the same thread |
+| **Stable Fingerprint** | Latest CLI field shape, derived per API key and stable across restarts |
 | **OpenTelemetry** | `traceparent` (W3C Trace Context) |
 | **Environment** | `x-cli-environment: production` |
 | **Project Slug** | Custom `x-project-slug` |
@@ -346,7 +372,7 @@ Based on analysis of official CLI v0.32.3 traffic:
 | **Key Validation** | Regex `user_[a-zA-Z0-9_-]+`, auto-cleans extra paths/prefixes, rejects `sk-xxx` format |
 | **Stream Timeout** | 30s streaming / 90s non-streaming → 429 with SDK auto-retry |
 | **Consecutive Timeout** | 3 consecutive timeouts before "reduce context" hint |
-| **Zero-Output Guard** | outputTokens=0 → 502 error (SDK auto-retry, anti false billing) |
+| **Zero-Output Guard** | outputTokens=0 → 429 error (SDK auto-retry, anti false billing) |
 | **Upstream Abort** | `AbortController` on client disconnect + all error paths |
 | **Privacy Logging** | No API key fragments, no error bodies, no stack traces in logs |
 
@@ -359,7 +385,7 @@ Based on analysis of official CLI v0.32.3 traffic:
   "config": {
     "workingDir": "C:\\project",
     "date": "2026-06-07",
-    "environment": "win32-x64, Node.js v24.16.0",
+    "environment": "linux",
     "structure": [],
     "isGitRepo": false,
     "currentBranch": "",
@@ -367,13 +393,15 @@ Based on analysis of official CLI v0.32.3 traffic:
     "gitStatus": "",
     "recentCommits": []
   },
-  "memory": "",
-  "taste": "",
-  "skills": "",
+  "memory": null,
+  "taste": null,
+  "skills": null,
   "permissionMode": "standard",
+  "mode": "interactive",
   "params": {
     "model": "deepseek/deepseek-v4-flash",
     "messages": [...],
+    "tools": [],
     "max_tokens": 64000,
     "stream": true,
     "reasoning_effort": "max"
@@ -381,6 +409,8 @@ Based on analysis of official CLI v0.32.3 traffic:
   "threadId": "<uuid>"
 }
 ```
+
+`threadId` is sent only when the client provides a valid UUID through `x-thread-id` or `x-command-code-thread-id`; otherwise it is omitted as in the latest CLI.
 
 ### CC API Image Message Format
 
@@ -449,4 +479,8 @@ This project is for **educational and research purposes** only.
 ```bash
 # Start with watch mode (auto-reload on file changes)
 npm run dev
+
+# Run syntax checks and built-in integration tests
+npm run check
+npm test
 ```

@@ -2,18 +2,18 @@
 
 > [English Docs](README.md)
 
-将 Command Code API 转换为 OpenAI / Anthropic 兼容接口的反代代理。单文件，零外部依赖。
+将 Command Code API 转换为 OpenAI / Anthropic 兼容接口的反代代理。Node.js ESM 实现，零外部依赖。
 
-基于对官方 CLI v0.32.3 网络流量的分析，精确还原了 Command Code API 的请求协议，并实现了多层兼容适配。
+基于本机 `command-code@1.7.0` CLI bundle 的分析，对齐 Command Code API 请求协议，并实现多层兼容适配。
 
-**完整功能**：OpenAI Chat Completions + Anthropic Messages API | 流式/非流式输出 | 工具调用 (tool_use) | 多模态图片输入 | 推理强度 (reasoning_effort) | 动态模型列表 | 缓存命中指标 | 客户端断连检测（上游中止） | 零输出 → 502 自动重试 | 连续超时 → 429 自动重试 | 隐私保护日志
+**完整功能**：OpenAI Chat Completions + Anthropic Messages API | 流式/非流式输出 | 工具调用 (tool_use) | 多模态图片输入 | 推理强度 (reasoning_effort) | 动态模型列表 | 缓存命中指标 | 客户端断连检测（上游中止） | 零输出 → 429 自动重试 | 连续超时 → 429 自动重试 | 隐私保护日志
 
 **社区**: [Linux.do](https://linux.do) — 一个友好的中文技术社区。
 
 ## 快速开始
 
 ```bash
-npm start        # 启动（默认 http://0.0.0.0:3000）
+npm start        # 启动（默认 http://0.0.0.0:3050）
 npm run dev      # watch 模式（文件修改自动重启）
 ```
 
@@ -33,7 +33,9 @@ commandcode/
 ├── config.json           # 端口 / 日志路径等
 ├── LICENSE               # MIT License
 ├── package.json          # npm start / npm run dev
-├── proxy.mjs             # 单文件核心代理（~1600 行）
+├── proxy.mjs             # HTTP 入口与请求编排
+├── src/                  # 配置、校验、状态和 CC 客户端模块
+├── test/                 # Node.js 内置测试
 ├── Dockerfile            # 容器构建文件（node:22-alpine）
 ├── docker-compose.yml    # 容器编排
 ├── .dockerignore         # 构建上下文排除规则
@@ -47,10 +49,19 @@ commandcode/
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `port` | `3000` | 监听端口 |
+| `port` | `3050` | 监听端口 |
 | `host` | `0.0.0.0` | 监听地址 |
 | `apiBase` | `https://api.commandcode.ai` | CC API 地址 |
+| `protocolVersion` | `1.7.0` | 请求协议实现基线，不控制发送给上游的版本头 |
+| `cliEnvironment` | `production` | `x-cli-environment` 请求头 |
+| `userAgent` | `cli` | CLI 请求 User-Agent |
 | `projectSlug` | `cc-proxy` | `x-project-slug` header |
+| `mode` | `interactive` | CC CLI 请求模式 |
+| `permissionMode` | `standard` | CC 权限模式 |
+| `tasteLearningEnabled` | `false` | `x-taste-learning` 开关 |
+| `oauthEnforced` | `false` | `x-co-flag` 开关 |
+| `cmdZdr` | `false` | 是否发送 `x-cmd-zdr: 1` |
+| `fingerprintSalt` | `""` | 指纹派生盐，生产环境建议通过环境变量设置 |
 | `logFile` | `""` | 日志文件路径（空=仅控制台） |
 | `logLevel` | `info` | 日志级别 |
 | `useProviderModels` | `true` | 从 Provider API 动态拉取模型列表 |
@@ -63,9 +74,21 @@ commandcode/
 | `PORT` | `port` |
 | `HOST` | `host` |
 | `CC_API_BASE` | `apiBase` |
+| `COMMAND_CODE_PROTOCOL_VERSION` | `protocolVersion` |
+| `CC_CLI_ENVIRONMENT` | `cliEnvironment` |
+| `CC_USER_AGENT` | `userAgent` |
 | `PROJECT_SLUG` | `projectSlug` |
+| `CC_MODE` | `mode` |
+| `CC_PERMISSION_MODE` | `permissionMode` |
+| `CC_TASTE_LEARNING` | `tasteLearningEnabled` |
+| `CC_OAUTH_ENFORCED` | `oauthEnforced` |
+| `CMD_ZDR` | `cmdZdr` |
+| `OSS_PRIMARY_PROVIDER` | `ossPrimaryProvider` |
+| `FINGERPRINT_SALT` | `fingerprintSalt` |
 | `LOG_FILE` | `logFile` |
+| `LOG_LEVEL` | `logLevel` |
 | `CC_USE_PROVIDER_MODELS` | `useProviderModels` |
+| `MODEL_REFRESH_INTERVAL_MS` | `modelRefreshIntervalMs` |
 
 ## API 接口
 
@@ -78,7 +101,7 @@ OpenAI Chat Completions 兼容。支持流式和非流式、工具调用、多�
 | 参数 | 必填 | 说明 |
 |------|------|------|
 | `model` | 是 | 模型 ID（见模型列表） |
-| `messages` | 是 | 对话消息，支持 `system/user/assistant/tool` 角色 |
+| `messages` | 是 | 对话消息；`developer` 会映射为 `system`，旧式 `function` 会映射为 `tool` |
 | `max_tokens` | 否 | 最大生成 token（默认 64000） |
 | `stream` | 否 | 是否 SSE 流式（默认 false） |
 | `temperature` | 否 | 采样温度（0-2）|
@@ -332,13 +355,16 @@ print(message.content[0].text)
 
 ## 反检测
 
-基于对官方 CLI v0.32.3 流量的分析，实现了以下兼容适配：
+基于对本机 `command-code@1.7.0` bundle 的分析，实现了以下兼容适配：
 
 | 机制 | 实现 |
 |------|------|
 | **按 Key 分 Session** | 每个 API Key 独立 session，12h 过期 + 1h 随机抖动 |
-| **动态版本号** | `x-command-code-version` 从 npm registry 自动拉取（24h 刷新） |
-| **CLI 信封格式** | config/memory/taste/permissionMode/params/threadId |
+| **协议基线 / 动态版本头** | 请求协议按 `1.7.0` 实现；`x-command-code-version` 每 24 小时从 npm latest 刷新，失败时回退到 `1.7.0` |
+| **CLI 信封格式** | config/memory/taste/skills/permissionMode/mode/params/threadId |
+| **工具与图片格式** | 工具字段、base64 图片和 mimeType 对齐最新版 wire format |
+| **流式续接** | `pause_turn` 最多按同一请求线程继续两次 |
+| **稳定指纹** | 按 API Key 派生最新版 CLI 所需的指纹字段，重启后保持稳定 |
 | **OpenTelemetry** | `traceparent` (W3C Trace Context) |
 | **环境标识** | `x-cli-environment: production` |
 | **Project Slug** | 自定义 `x-project-slug` |
@@ -346,7 +372,7 @@ print(message.content[0].text)
 | **API Key 格式验证** | 正则 `user_[a-zA-Z0-9_-]+`，自动清理多余路径/前缀，`sk-xxx` 等非 `user_` 格式拒 |
 | **流式超时保护** | 流式 30s、非流式 90s → 429 + SDK 自动重试 |
 | **连续超时阈值** | 连续 3 次超时后才提示压缩上下文 |
-| **零输出防护** | outputTokens=0 → 502 错误（SDK 自动重试，反异常计费） |
+| **零输出防护** | outputTokens=0 → 429 错误（SDK 自动重试，反异常计费） |
 | **上游中止** | 客户端断连 + 全部错误路径 `AbortController` 打断 CC |
 | **隐私保护日志** | 日志不含 API Key 片段、错误 body、stack trace |
 
@@ -359,7 +385,7 @@ print(message.content[0].text)
   "config": {
     "workingDir": "C:\\project",
     "date": "2026-06-07",
-    "environment": "win32-x64, Node.js v24.16.0",
+    "environment": "linux",
     "structure": [],
     "isGitRepo": false,
     "currentBranch": "",
@@ -367,13 +393,15 @@ print(message.content[0].text)
     "gitStatus": "",
     "recentCommits": []
   },
-  "memory": "",
-  "taste": "",
-  "skills": "",
+  "memory": null,
+  "taste": null,
+  "skills": null,
   "permissionMode": "standard",
+  "mode": "interactive",
   "params": {
     "model": "deepseek/deepseek-v4-flash",
     "messages": [...],
+    "tools": [],
     "max_tokens": 64000,
     "stream": true,
     "reasoning_effort": "max"
@@ -381,6 +409,8 @@ print(message.content[0].text)
   "threadId": "<uuid>"
 }
 ```
+
+`threadId` 仅在客户端通过 `x-thread-id` 或 `x-command-code-thread-id` 传入有效 UUID 时发送；否则代理会按最新版 CLI 的可选字段规则省略它。
 
 ### CC API 图片消息格式
 
@@ -451,4 +481,8 @@ npm run docker:build:multi
 ```bash
 # 带 watch 模式启动（文件修改自动重启）
 npm run dev
+
+# 运行语法检查和内置集成测试
+npm run check
+npm test
 ```
