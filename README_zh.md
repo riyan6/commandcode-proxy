@@ -56,7 +56,7 @@ commandcode/
 | `cliEnvironment` | `production` | `x-cli-environment` 请求头 |
 | `userAgent` | `cli` | CLI 请求 User-Agent |
 | `projectSlug` | `cc-proxy` | `x-project-slug` header |
-| `mode` | `interactive` | CC CLI 请求模式 |
+| `mode` | `agent` | CC CLI 请求模式，可选 `agent`、`learning`、`custom-agent`、`custom-agent-create`、`title-gen`、`tool-desc`、`compact`、`vision` |
 | `permissionMode` | `standard` | CC 权限模式 |
 | `tasteLearningEnabled` | `false` | `x-taste-learning` 开关 |
 | `oauthEnforced` | `false` | `x-co-flag` 开关 |
@@ -399,7 +399,7 @@ print(message.content[0].text)
   "taste": null,
   "skills": null,
   "permissionMode": "standard",
-  "mode": "interactive",
+  "mode": "agent",
   "params": {
     "model": "deepseek/deepseek-v4-flash",
     "messages": [...],

@@ -173,7 +173,7 @@ function toWireTools(tools = []) {
 
 export function buildCcRequest(openaiReq, {
   threadId,
-  mode = 'interactive',
+  mode = 'agent',
   permissionMode = 'standard',
   serverConfig,
 } = {}) {
@@ -205,7 +205,7 @@ export function buildCcRequest(openaiReq, {
     skills: null,
     permissionMode: normalizePermissionMode(permissionMode),
     ...(isUuid(threadId) ? { threadId } : {}),
-    mode: mode || 'interactive',
+    mode: mode || 'agent',
     params: {
       model: model || 'deepseek/deepseek-v4-flash',
       messages: buildWireMessages(messages),

@@ -32,12 +32,12 @@ test('请求体与 command-code 1.7.0 的 CLI 信封和工具格式一致', () =
     }],
   }, {
     threadId: '123e4567-e89b-12d3-a456-426614174000',
-    mode: 'interactive',
+    mode: 'agent',
     permissionMode: 'standard',
   });
 
   assert.equal(body.skills, null);
-  assert.equal(body.mode, 'interactive');
+  assert.equal(body.mode, 'agent');
   assert.equal(body.threadId, '123e4567-e89b-12d3-a456-426614174000');
   assert.equal(body.params.system, '你是助手');
   assert.equal(body.params.tools[0].name, 'lookup');
@@ -64,6 +64,7 @@ test('兼容 Agent 的 developer 和旧式 function 消息格式', () => {
   });
 
   assert.equal(body.params.system, '你是一个代码助手');
+  assert.equal(body.mode, 'agent');
   assert.deepEqual(body.params.messages.map(message => message.role), ['user', 'assistant', 'tool']);
   assert.ok(body.params.messages.every(message => Array.isArray(message.content)));
   assert.equal(body.params.messages[2].content[0].type, 'tool-result');

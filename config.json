@@ -7,7 +7,7 @@
   "cliEnvironment": "production",
   "userAgent": "cli",
   "projectSlug": "cc-proxy",
-  "mode": "interactive",
+  "mode": "agent",
   "permissionMode": "standard",
   "tasteLearningEnabled": false,
   "oauthEnforced": false,

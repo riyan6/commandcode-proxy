@@ -5,6 +5,16 @@ import { fileURLToPath } from 'url';
 // 统一加载配置：文件配置作为基础，环境变量拥有更高优先级。
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
+const VALID_CC_MODES = new Set([
+  'agent',
+  'learning',
+  'custom-agent',
+  'custom-agent-create',
+  'title-gen',
+  'tool-desc',
+  'compact',
+  'vision',
+]);
 
 function readPositiveInteger(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -22,7 +32,7 @@ export function loadConfig() {
     cliEnvironment: 'production',
     userAgent: 'cli',
     projectSlug: 'cc-proxy',
-    mode: 'interactive',
+    mode: 'agent',
     permissionMode: 'standard',
     tasteLearningEnabled: false,
     oauthEnforced: false,
@@ -81,6 +91,8 @@ export function loadConfig() {
   }
 
   defaults.port = readPositiveInteger(defaults.port, 3050);
+  // 只允许 Command Code 1.7.0 已知的请求模式，普通对话默认使用 agent。
+  if (!VALID_CC_MODES.has(defaults.mode)) defaults.mode = 'agent';
   if (typeof defaults.protocolVersion !== 'string' || !defaults.protocolVersion.trim()) {
     defaults.protocolVersion = '1.7.0';
   }

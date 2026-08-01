@@ -248,7 +248,7 @@ test('OpenAI 流式工具调用和参数透传正常', async () => {
   assert.ok(lastGenerateBody.params.messages.every(message => Array.isArray(message.content)));
   assert.equal(lastGenerateBody.config.environment, process.platform);
   assert.ok(Array.isArray(lastGenerateBody.config.structure));
-  assert.equal(lastGenerateBody.mode, 'interactive');
+  assert.equal(lastGenerateBody.mode, 'agent');
   assert.equal(lastGenerateBody.permissionMode, 'standard');
   assert.equal(lastGenerateBody.threadId, '123e4567-e89b-12d3-a456-426614174000');
   assert.equal(lastGenerateBody.params.tools[0].type, undefined);

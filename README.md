@@ -56,7 +56,7 @@ commandcode/
 | `cliEnvironment` | `production` | `x-cli-environment` header |
 | `userAgent` | `cli` | CLI User-Agent |
 | `projectSlug` | `cc-proxy` | `x-project-slug` header |
-| `mode` | `interactive` | CC CLI request mode |
+| `mode` | `agent` | CC CLI request mode (`agent`, `learning`, `custom-agent`, `custom-agent-create`, `title-gen`, `tool-desc`, `compact`, or `vision`) |
 | `permissionMode` | `standard` | CC permission mode |
 | `tasteLearningEnabled` | `false` | `x-taste-learning` switch |
 | `oauthEnforced` | `false` | `x-co-flag` switch |
@@ -274,7 +274,7 @@ Health check. Returns `OK`.
 
 The proxy returns a live model list via `GET /v1/models`. Below are common models for reference; the actual list depends on the live API response — see [Command Code Pricing](https://commandcode.ai/docs/resources/pricing-limits) for plan details.
 
-The proxy returns the official Provider API JSON without constructing a local model list. A valid `Authorization: Bearer user_...` header is required; missing keys, upstream failures, or disabled Provider API return an error instead of fabricated model data. The response is cached per API key for 5 minutes.
+The proxy returns the official Provider API JSON without constructing a local model list. The upstream endpoint supports anonymous access; upstream failures or disabled Provider API return an error instead of fabricated model data. The response is cached per API key or publicly for 5 minutes.
 
 ### Common Models
 
@@ -399,7 +399,7 @@ Based on analysis of the local `command-code@1.7.0` bundle:
   "taste": null,
   "skills": null,
   "permissionMode": "standard",
-  "mode": "interactive",
+  "mode": "agent",
   "params": {
     "model": "deepseek/deepseek-v4-flash",
     "messages": [...],
