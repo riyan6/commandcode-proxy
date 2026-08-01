@@ -160,46 +160,6 @@ async function ensureInitialized(apiKey, signal, incomingHeaders = {}) {
   }
 }
 
-// ── 模型列表 ───────────────────────────────────────
-const MODELS = [
-  // Anthropic
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' },
-  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
-  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' },
-  // OpenAI
-  { id: 'gpt-5.5', name: 'GPT-5.5' },
-  { id: 'gpt-5.4', name: 'GPT-5.4' },
-  { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini' },
-  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
-  // DeepSeek
-  { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-  { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
-  // Kimi
-  { id: 'moonshotai/Kimi-K2.6', name: 'Kimi K2.6' },
-  { id: 'moonshotai/Kimi-K2.5', name: 'Kimi K2.5' },
-  // GLM
-  { id: 'zai-org/GLM-5.1', name: 'GLM 5.1' },
-  { id: 'zai-org/GLM-5', name: 'GLM 5' },
-  // MiniMax
-  { id: 'MiniMaxAI/MiniMax-M3', name: 'MiniMax M3' },
-  { id: 'MiniMaxAI/MiniMax-M2.7', name: 'MiniMax M2.7' },
-  { id: 'MiniMaxAI/MiniMax-M2.5', name: 'MiniMax M2.5' },
-  // Qwen
-  { id: 'Qwen/Qwen3.6-Max-Preview', name: 'Qwen 3.6 Max Preview' },
-  { id: 'Qwen/Qwen3.6-Plus', name: 'Qwen 3.6 Plus' },
-  { id: 'Qwen/Qwen3.7-Max', name: 'Qwen 3.7 Max' },
-  // Step
-  { id: 'stepfun/Step-3.7-Flash', name: 'Step 3.7 Flash' },
-  { id: 'stepfun/Step-3.5-Flash', name: 'Step 3.5 Flash' },
-  // Xiaomi
-  { id: 'xiaomi/mimo-v2.5-pro', name: 'MiMo V2.5 Pro' },
-  { id: 'xiaomi/mimo-v2.5', name: 'MiMo V2.5' },
-  // Gemini
-  { id: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
-  { id: 'google/gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite' },
-];
-
 // ── 工具函数 ───────────────────────────────────────
 
 function nowUnix() {
@@ -1277,15 +1237,26 @@ async function handleMessages(req, res) {
   }
 }
 
-// ── 动态模型列表 ────────────────────────────────────
+// ── 官方模型列表 ────────────────────────────────────
+
+function createModelsError(status, message, body) {
+  const error = new Error(message);
+  error.status = status;
+  error.body = body || {
+    error: { message, type: status === 401 ? 'authentication_error' : 'upstream_error' },
+  };
+  return error;
+}
 
 async function fetchModels(apiKey) {
   const cachedModels = state.getCachedModels(apiKey, CFG.modelRefreshIntervalMs);
   if (cachedModels) return cachedModels;
 
-  try {
-    if (!apiKey || !CFG.useProviderModels) throw new Error('Provider models disabled');
+  if (!CFG.useProviderModels) {
+    throw createModelsError(503, 'Provider models are disabled by configuration');
+  }
 
+  try {
     const response = await fetch(`${CFG.apiBase}/provider/v1/models`, {
       headers: buildCommandCodeHeaders({
         apiKey,
@@ -1301,40 +1272,51 @@ async function fetchModels(apiKey) {
       signal: AbortSignal.timeout(10000),
     });
 
-    if (response.ok) {
-      const data = await response.json();
-      if (Array.isArray(data.data)) {
-        const models = data.data.map(m => ({
-          id: m.id,
-          name: m.id,
-        }));
-        state.setCachedModels(apiKey, models);
-        log('info', 'Fetched models from Provider API', { count: models.length });
-        return models;
-      }
+    const responseText = await response.text();
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      data = null;
     }
-    log('warn', 'Provider models fetch failed, using hardcoded list', { status: response.status });
-  } catch (e) {
-    log('warn', 'Provider models fetch error, using hardcoded list', { error: e.message });
-  }
 
-  // Fallback to hardcoded MODELS
-  return MODELS;
+    if (!response.ok) {
+      throw createModelsError(
+        response.status,
+        `Provider models request failed with status ${response.status}`,
+        data,
+      );
+    }
+    if (!data || typeof data !== 'object' || !Array.isArray(data.data)) {
+      throw createModelsError(502, 'Provider models response has an invalid format');
+    }
+
+    // 保留官方完整 JSON，只校验 data 为模型数组，不再构造本地回退列表。
+    state.setCachedModels(apiKey, data);
+    log('info', 'Fetched official models from Provider API', { count: data.data.length });
+    return data;
+  } catch (e) {
+    if (e.status) throw e;
+    log('warn', 'Provider models fetch failed', { error: e.message });
+    throw createModelsError(502, `Provider models request failed: ${e.message}`);
+  }
 }
 
 async function handleModels(req, res) {
   const apiKey = getApiKey(req.headers);
-  const models = await fetchModels(apiKey);
-  const now = nowUnix();
-  sendJSON(res, 200, {
-    object: 'list',
-    data: models.map(m => ({
-      id: m.id,
-      object: 'model',
-      created: now,
-      owned_by: 'command-code',
-    })),
-  });
+  try {
+    const models = await fetchModels(apiKey);
+    // 官方接口支持匿名访问，响应原样返回，避免代理层修改模型字段或遗漏新字段。
+    sendJSON(res, 200, models);
+  } catch (error) {
+    log('warn', 'Models endpoint failed', {
+      status: error.status || 502,
+      message: error.message,
+    });
+    sendJSON(res, error.status || 502, error.body || {
+      error: { message: error.message, type: 'upstream_error' },
+    });
+  }
 }
 
 function handleHealth(req, res) {
@@ -1389,7 +1371,7 @@ server.listen(CFG.port, CFG.host, () => {
   log('info', 'CC Proxy started', {
     url: `http://${CFG.host}:${CFG.port}`,
     api: CFG.apiBase,
-    models: MODELS.length,
+    models: 'provider-api-only',
     session: '12h + 1h jitter, per API key',
     logFile: CFG.logFile || '(console only)',
   });

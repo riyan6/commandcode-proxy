@@ -64,7 +64,7 @@ commandcode/
 | `fingerprintSalt` | `""` | Salt for stable per-key fingerprint derivation |
 | `logFile` | `""` | Log file path (empty = console only) |
 | `logLevel` | `info` | Log level |
-| `useProviderModels` | `true` | Dynamically fetch model list from Provider API |
+| `useProviderModels` | `true` | Return the official Provider API model list; `false` returns an error |
 | `modelRefreshIntervalMs` | `300000` | Model list cache refresh interval (5 min) |
 
 ### Environment Variables
@@ -254,7 +254,7 @@ data: {"type":"message_stop"}
 
 ### `GET /v1/models`
 
-Returns available model list. Fetched dynamically from Provider API (5 min cache), falls back to hardcoded list on failure.
+Returns the official Provider API model list (5 min cache); the upstream endpoint supports anonymous access, and upstream failures return an error instead of a local fallback list.
 
 ### `GET /health`
 
@@ -273,6 +273,8 @@ Health check. Returns `OK`.
 ## Model List
 
 The proxy returns a live model list via `GET /v1/models`. Below are common models for reference; the actual list depends on the live API response — see [Command Code Pricing](https://commandcode.ai/docs/resources/pricing-limits) for plan details.
+
+The proxy returns the official Provider API JSON without constructing a local model list. A valid `Authorization: Bearer user_...` header is required; missing keys, upstream failures, or disabled Provider API return an error instead of fabricated model data. The response is cached per API key for 5 minutes.
 
 ### Common Models
 

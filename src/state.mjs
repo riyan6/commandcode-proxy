@@ -5,6 +5,7 @@ export function createStateStore({ generateFingerprint, log }) {
   const sessionStore = new Map();
   const keyStateStore = new Map();
   const modelCacheStore = new Map();
+  let publicModelCache = null;
   const sessionDurationMs = 12 * 60 * 60 * 1000;
   const sessionJitterMs = 60 * 60 * 1000;
   const stateRetentionMs = sessionDurationMs + sessionJitterMs;
@@ -80,16 +81,20 @@ export function createStateStore({ generateFingerprint, log }) {
   }
 
   function getCachedModels(apiKey, refreshIntervalMs) {
-    if (!apiKey) return null;
-    const entry = modelCacheStore.get(apiKey);
+    const entry = apiKey ? modelCacheStore.get(apiKey) : publicModelCache;
     if (!entry || Date.now() - entry.fetchedAt >= refreshIntervalMs) return null;
-    touchKey(apiKey);
+    if (apiKey) touchKey(apiKey);
     return entry.models;
   }
 
   function setCachedModels(apiKey, models) {
-    if (!apiKey) return;
-    modelCacheStore.set(apiKey, { models, fetchedAt: Date.now() });
+    const entry = { models, fetchedAt: Date.now() };
+    if (!apiKey) {
+      // 官方模型接口支持匿名访问，匿名请求使用独立的公共缓存。
+      publicModelCache = entry;
+      return;
+    }
+    modelCacheStore.set(apiKey, entry);
     touchKey(apiKey);
   }
 
@@ -112,6 +117,9 @@ export function createStateStore({ generateFingerprint, log }) {
       if (!keyStateStore.has(apiKey) || now - entry.fetchedAt >= stateRetentionMs) {
         modelCacheStore.delete(apiKey);
       }
+    }
+    if (publicModelCache && now - publicModelCache.fetchedAt >= stateRetentionMs) {
+      publicModelCache = null;
     }
     if (cleaned > 0) log('info', 'Session cleanup', { cleaned, remaining: sessionStore.size });
   }

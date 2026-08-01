@@ -64,7 +64,7 @@ commandcode/
 | `fingerprintSalt` | `""` | 指纹派生盐，生产环境建议通过环境变量设置 |
 | `logFile` | `""` | 日志文件路径（空=仅控制台） |
 | `logLevel` | `info` | 日志级别 |
-| `useProviderModels` | `true` | 从 Provider API 动态拉取模型列表 |
+| `useProviderModels` | `true` | 返回官方 Provider API 模型列表，设为 `false` 时返回错误 |
 | `modelRefreshIntervalMs` | `300000` | 模型列表缓存刷新间隔（5min） |
 
 ### 环境变量
@@ -254,7 +254,7 @@ data: {"type":"message_stop"}
 
 ### `GET /v1/models`
 
-返回可用模型列表。优先从 Provider API 动态拉取（5min 缓存），失败回退硬编码列表。
+返回官方 Provider API 模型列表（5min 缓存）；官方接口支持匿名访问，上游失败时直接返回错误，不使用本地回退列表。
 
 ### `GET /health`
 
@@ -273,6 +273,8 @@ data: {"type":"message_stop"}
 ## 模型列表
 
 代理访问 `GET /v1/models` 会返回实时模型列表。以下为常见模型参考，完整列表以实际接口返回为准——各模型套餐可参考 [Command Code Pricing](https://commandcode.ai/docs/resources/pricing-limits)。
+
+代理会原样返回官方 Provider API 的 JSON，不再自行构造本地模型列表。官方接口支持匿名访问，请求可选择携带 `Authorization: Bearer user_...`。上游失败或 Provider API 被关闭时直接返回错误，不返回伪造模型数据；响应按 API Key 或公共请求缓存 5 分钟。
 
 ### 常用模型
 

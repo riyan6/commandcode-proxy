@@ -65,6 +65,22 @@ before(async () => {
       return;
     }
 
+    if (req.url === '/provider/v1/models') {
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        object: 'list',
+        data: [{
+          id: 'official-demo-model',
+          object: 'model',
+          created: 1700000000,
+          owned_by: 'official-provider',
+          name: 'Official Demo Model',
+          context_length: 128000,
+        }],
+      }));
+      return;
+    }
+
     if (req.url === '/alpha/generate') {
       lastGenerateBody = JSON.parse(bodyText);
       lastGenerateHeaders = req.headers;
@@ -116,7 +132,7 @@ before(async () => {
       PORT: String(proxyPort),
       HOST: '127.0.0.1',
       CC_API_BASE: `http://127.0.0.1:${upstreamPort}`,
-      CC_USE_PROVIDER_MODELS: 'false',
+      CC_USE_PROVIDER_MODELS: 'true',
       LOG_LEVEL: 'error',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -154,6 +170,38 @@ test('健康检查和认证错误返回正确状态', async () => {
   });
   assert.equal(invalid.status, 400);
   assert.match(await invalid.text(), /messages/);
+});
+
+test('模型列表保留官方 name 和 context_length 字段', async () => {
+  const response = await fetch(`${proxyUrl}/v1/models`, {
+    headers: { Authorization: 'Bearer user_integration_models' },
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body.data, [{
+    id: 'official-demo-model',
+    object: 'model',
+    created: 1700000000,
+    owned_by: 'official-provider',
+    name: 'Official Demo Model',
+    context_length: 128000,
+  }]);
+});
+
+test('模型列表没有 API Key 时仍直接返回官方数据', async () => {
+  const response = await fetch(`${proxyUrl}/v1/models`);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body.data, [{
+    id: 'official-demo-model',
+    object: 'model',
+    created: 1700000000,
+    owned_by: 'official-provider',
+    name: 'Official Demo Model',
+    context_length: 128000,
+  }]);
 });
 
 test('OpenAI 流式工具调用和参数透传正常', async () => {
