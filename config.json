@@ -3,7 +3,7 @@
   "host": "0.0.0.0",
   "apiKey": "",
   "apiBase": "https://api.commandcode.ai",
-  "protocolVersion": "1.7.0",
+  "protocolVersion": "1.15.1",
   "cliEnvironment": "production",
   "userAgent": "cli",
   "projectSlug": "cc-proxy",

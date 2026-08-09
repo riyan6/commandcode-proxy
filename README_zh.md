@@ -4,9 +4,9 @@
 
 将 Command Code API 转换为 OpenAI / Anthropic 兼容接口的反代代理。Node.js ESM 实现，零外部依赖。
 
-基于本机 `command-code@1.7.0` CLI bundle 的分析，对齐 Command Code API 请求协议，并实现多层兼容适配。
+基于本机 `command-code@1.15.1` CLI bundle 的分析，对齐 Command Code API 请求协议，并实现多层兼容适配。
 
-**完整功能**：OpenAI Chat Completions + Anthropic Messages API | 流式/非流式输出 | 工具调用 (tool_use) | 多模态图片输入 | 推理强度 (reasoning_effort) | 动态模型列表 | 缓存命中指标 | 客户端断连检测（上游中止） | 零输出 → 429 自动重试 | 连续超时 → 429 自动重试 | 隐私保护日志
+**完整功能**：Command Code 原生 HTTP/WebSocket 透传 | OpenAI Chat Completions + Anthropic Messages API | 流式/非流式输出 | 工具调用 (tool_use) | 多模态图片输入 | 推理强度 (reasoning_effort) | 动态模型列表 | 缓存命中指标 | 客户端断连检测（上游中止） | 零输出 → 429 自动重试 | 连续超时 → 429 自动重试 | 隐私保护日志
 
 **社区**: [Linux.do](https://linux.do) — 一个友好的中文技术社区。
 
@@ -52,7 +52,7 @@ commandcode/
 | `port` | `3050` | 监听端口 |
 | `host` | `0.0.0.0` | 监听地址 |
 | `apiBase` | `https://api.commandcode.ai` | CC API 地址 |
-| `protocolVersion` | `1.7.0` | 请求协议实现基线，不控制发送给上游的版本头 |
+| `protocolVersion` | `1.15.1` | 请求协议实现基线，不控制发送给上游的版本头 |
 | `cliEnvironment` | `production` | `x-cli-environment` 请求头 |
 | `userAgent` | `cli` | CLI 请求 User-Agent |
 | `projectSlug` | `cc-proxy` | `x-project-slug` header |
@@ -260,6 +260,20 @@ data: {"type":"message_stop"}
 
 健康检查。返回 `OK`。
 
+### Command Code 原生透传
+
+代理会在相同路径透传 Command Code 原生 API。`/alpha/*`、`/provider/*` 以及 1.15.1 bundle 声明的 `/beta/*`、`/internal/*` 会被发送到固定的 `apiBase`；其他路径不会转发，因此它不是任意 URL 代理。
+
+原生接口保留 HTTP method、query、请求体原始字节、认证/OAuth/Cookie 请求头、上游状态码、响应头和响应流。只移除 `Host`、`Connection`、`Transfer-Encoding` 等逐跳头；3xx 响应不会自动跟随。请求体上限仍为 10MB。生产部署建议为原生入口使用专用域名，避免与其他 Web 应用共享 Cookie。
+
+```bash
+curl http://127.0.0.1:3050/alpha/whoami \
+  -H "Authorization: Bearer user_xxxxxxxxx" \
+  -H "x-command-code-version: 1.15.1"
+```
+
+`POST /alpha/generate` 会返回原生逐行 JSON（NDJSON），不会转换为 OpenAI SSE。沙箱实时通道使用相同路径的 WebSocket 隧道，例如 `ws://127.0.0.1:3050/alpha/sandbox/stream/...`。外部 OAuth、npm 更新、遥测和用户自定义 MCP 地址不属于 Command API origin，不会被这个入口代理。
+
 ## 错误码
 
 | HTTP 状态 | 说明 |
@@ -357,12 +371,12 @@ print(message.content[0].text)
 
 ## 反检测
 
-基于对本机 `command-code@1.7.0` bundle 的分析，实现了以下兼容适配：
+基于对本机 `command-code@1.15.1` bundle 的分析，实现了以下兼容适配：
 
 | 机制 | 实现 |
 |------|------|
 | **按 Key 分 Session** | 每个 API Key 独立 session，12h 过期 + 1h 随机抖动 |
-| **协议基线 / 动态版本头** | 请求协议按 `1.7.0` 实现；`x-command-code-version` 每 24 小时从 npm latest 刷新，失败时回退到 `1.7.0` |
+| **协议基线 / 动态版本头** | 请求协议按 `1.15.1` 实现；`x-command-code-version` 每 24 小时从 npm latest 刷新，失败时回退到 `1.15.1` |
 | **CLI 信封格式** | config/memory/taste/skills/permissionMode/mode/params/threadId |
 | **工具与图片格式** | 工具字段、base64 图片和 mimeType 对齐最新版 wire format |
 | **流式续接** | `pause_turn` 最多按同一请求线程继续两次 |

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
+import { connect } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +14,9 @@ let proxyUrl;
 let lastGenerateBody = null;
 let lastGenerateHeaders = null;
 let lastFingerprintBody = null;
+let lastNativeRequest = null;
+let lastWebSocketRequest = null;
+let lastWebSocketClosed = null;
 const generateCallCounts = new Map();
 
 function readRequestBody(req) {
@@ -110,8 +114,47 @@ before(async () => {
       return;
     }
 
+    if (req.url === '/alpha/native-test?mode=raw') {
+      lastNativeRequest = {
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        body: bodyText,
+      };
+      res.writeHead(207, {
+        'Content-Type': 'application/x-ndjson',
+        'X-Native-Response': 'preserved',
+        'Retry-After': '17',
+      });
+      res.write('{"type":"first"}\n');
+      res.end('{"type":"second"}\n');
+      return;
+    }
+
     res.writeHead(404);
     res.end('{}');
+  });
+
+  upstream.on('upgrade', (req, socket, head) => {
+    lastWebSocketRequest = { url: req.url, headers: req.headers };
+    socket.on('error', () => {});
+    lastWebSocketClosed = new Promise(resolveClose => socket.once('close', resolveClose));
+    socket.write([
+      'HTTP/1.1 101 Switching Protocols',
+      'Upgrade: websocket',
+      'Connection: Upgrade, X-Private-Hop',
+      'X-Private-Hop: remove-me',
+      'Keep-Alive: timeout=5',
+      '',
+      '',
+    ].join('\r\n'));
+    if (head.length > 0) socket.write(head);
+    if (req.url.includes('upstream-close')) {
+      setImmediate(() => socket.end('final-frame'));
+    } else {
+      socket.on('data', chunk => socket.write(chunk));
+      socket.once('end', () => socket.end());
+    }
   });
 
   const upstreamPort = await listen(upstream);
@@ -170,6 +213,129 @@ test('健康检查和认证错误返回正确状态', async () => {
   });
   assert.equal(invalid.status, 400);
   assert.match(await invalid.text(), /messages/);
+});
+
+test('Command Code 原生 HTTP 路径按原始 method、query、body、status 和流透传', async () => {
+  const rawBody = '{\n  "message": "保持原始字节"\n}\n';
+  const response = await fetch(`${proxyUrl}/alpha/native-test?mode=raw`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer user_native_passthrough',
+      'Content-Type': 'application/json',
+      'x-command-code-version': '1.15.1',
+      'x-native-request': 'preserved',
+    },
+    body: rawBody,
+  });
+
+  assert.equal(response.status, 207);
+  assert.equal(response.headers.get('x-native-response'), 'preserved');
+  assert.equal(response.headers.get('retry-after'), '17');
+  assert.equal(await response.text(), '{"type":"first"}\n{"type":"second"}\n');
+  assert.equal(lastNativeRequest.method, 'POST');
+  assert.equal(lastNativeRequest.url, '/alpha/native-test?mode=raw');
+  assert.equal(lastNativeRequest.body, rawBody);
+  assert.equal(lastNativeRequest.headers.authorization, 'Bearer user_native_passthrough');
+  assert.equal(lastNativeRequest.headers['x-command-code-version'], '1.15.1');
+  assert.equal(lastNativeRequest.headers['x-native-request'], 'preserved');
+});
+
+test('Command Code 原生代理拒绝非官方 API namespace', async () => {
+  const response = await fetch(`${proxyUrl}/oauth/token`, {
+    method: 'POST',
+    body: '{}',
+  });
+  assert.equal(response.status, 404);
+});
+
+test('Command Code 原生代理在请求体超限后返回 413 并关闭连接', async () => {
+  const target = new URL(proxyUrl);
+  const socket = connect(Number(target.port), target.hostname);
+  socket.on('error', () => {});
+  await once(socket, 'connect');
+
+  let received = '';
+  socket.on('data', chunk => { received += chunk.toString('utf8'); });
+  const closed = once(socket, 'close');
+  socket.write([
+    'POST /alpha/native-test HTTP/1.1',
+    `Host: ${target.host}`,
+    `Content-Length: ${10 * 1024 * 1024 + 1}`,
+    'Content-Type: application/json',
+    '',
+    '',
+  ].join('\r\n'));
+  await closed;
+
+  assert.match(received, /^HTTP\/1\.1 413 Payload Too Large/);
+  assert.match(received, /Connection: close/i);
+});
+
+test('Command Code 原生 WebSocket upgrade 建立双向隧道', async () => {
+  const target = new URL(proxyUrl);
+  const socket = connect(Number(target.port), target.hostname);
+  socket.on('error', () => {});
+  await once(socket, 'connect');
+  socket.write([
+    'GET /alpha/sandbox/stream/demo-id?token=masked HTTP/1.1',
+    `Host: ${target.host}`,
+    'Connection: Upgrade',
+    'Upgrade: websocket',
+    'Sec-WebSocket-Version: 13',
+    'Sec-WebSocket-Key: dGVzdC1ub25jZQ==',
+    '',
+    '',
+  ].join('\r\n'));
+
+  let received = '';
+  while (!received.includes('\r\n\r\n')) {
+    const [chunk] = await once(socket, 'data');
+    received += chunk.toString('utf8');
+  }
+  assert.match(received, /^HTTP\/1\.1 101 Switching Protocols/);
+  assert.doesNotMatch(received, /x-private-hop|keep-alive/i);
+  assert.equal(lastWebSocketRequest.url, '/alpha/sandbox/stream/demo-id?token=masked');
+
+  socket.write('tunnel-ping');
+  const [echo] = await once(socket, 'data');
+  assert.equal(echo.toString('utf8'), 'tunnel-ping');
+  const closed = new Promise(resolveClose => socket.once('close', resolveClose));
+  socket.end();
+  await closed;
+  await Promise.race([
+    lastWebSocketClosed,
+    new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('上游 WebSocket 未随客户端关闭')), 1000);
+      timer.unref?.();
+    }),
+  ]);
+});
+
+test('Command Code 原生 WebSocket 保留上游正常 EOF', async () => {
+  const target = new URL(proxyUrl);
+  const socket = connect(Number(target.port), target.hostname);
+  let socketError = null;
+  let received = '';
+  socket.on('error', error => { socketError = error; });
+  socket.on('data', chunk => { received += chunk.toString('utf8'); });
+  await once(socket, 'connect');
+  const ended = new Promise(resolveEnd => socket.once('end', resolveEnd));
+  socket.write([
+    'GET /alpha/sandbox/stream/upstream-close HTTP/1.1',
+    `Host: ${target.host}`,
+    'Connection: Upgrade',
+    'Upgrade: websocket',
+    'Sec-WebSocket-Version: 13',
+    'Sec-WebSocket-Key: dGVzdC1ub25jZQ==',
+    '',
+    '',
+  ].join('\r\n'));
+
+  await ended;
+  assert.equal(socketError, null);
+  assert.match(received, /^HTTP\/1\.1 101 Switching Protocols/);
+  assert.match(received, /final-frame$/);
+  socket.destroy();
 });
 
 test('模型列表保留官方 name 和 context_length 字段', async () => {

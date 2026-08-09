@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildCcRequest } from '../src/adapters.mjs';
 
-test('请求体与 command-code 1.7.0 的 CLI 信封和工具格式一致', () => {
+test('请求体与 command-code 1.15.1 的 CLI 信封和工具格式一致', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [
@@ -68,4 +68,24 @@ test('兼容 Agent 的 developer 和旧式 function 消息格式', () => {
   assert.deepEqual(body.params.messages.map(message => message.role), ['user', 'assistant', 'tool']);
   assert.ok(body.params.messages.every(message => Array.isArray(message.content)));
   assert.equal(body.params.messages[2].content[0].type, 'tool-result');
+});
+
+test('工具结果的多个文本块按 command-code 1.15.1 格式用换行拼接', () => {
+  const body = buildCcRequest({
+    model: 'demo-model',
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'call_multiline',
+        content: [
+          { type: 'text', text: '第一行' },
+          { type: 'image', source: { type: 'base64', data: 'AAAA' } },
+          { type: 'text', text: '第二行' },
+        ],
+      }],
+    }],
+  });
+
+  assert.equal(body.params.messages[0].content[0].output.value, '第一行\n第二行');
 });

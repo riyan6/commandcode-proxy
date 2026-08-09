@@ -5,11 +5,20 @@
 import http from 'http';
 import { randomUUID } from 'crypto';
 import { appendFileSync } from 'fs';
+import { pipeline } from 'stream/promises';
 import { loadConfig } from './src/config.mjs';
 import { createStateStore } from './src/state.mjs';
 import { generateFingerprint } from './src/fingerprint.mjs';
 import { validateAnthropicRequest, validateOpenAIRequest } from './src/validation.mjs';
-import { buildCommandCodeHeaders, forwardToCC, generateTraceparent } from './src/cc-client.mjs';
+import {
+  buildCommandCodeHeaders,
+  filterProxyHeaders,
+  forwardNativeToCC,
+  forwardToCC,
+  generateTraceparent,
+  isCommandCodeNativePath,
+  tunnelNativeWebSocket,
+} from './src/cc-client.mjs';
 import {
   buildAnthropicResponse,
   buildCcRequest,
@@ -21,7 +30,7 @@ import {
 
 const CFG = loadConfig();
 
-// 请求体和字段转换固定按 command-code@1.7.0 实现，避免协议随上游版本漂移。
+// 请求体和字段转换固定按 command-code@1.15.1 实现，避免协议随上游版本漂移。
 const PROTOCOL_VERSION = CFG.protocolVersion;
 
 // 发给上游的 CLI 版本头单独跟随 npm latest，启动时刷新，之后每 24 小时刷新一次。
@@ -31,6 +40,7 @@ const CC_VERSION_REFRESH_MS = 24 * 60 * 60 * 1000;
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB — 请求体大小上限
 const STREAM_IDLE_TIMEOUT_MS = 30000;   // 30s — 流式无新数据中断
 const NONSTREAM_IDLE_TIMEOUT_MS = 90000; // 90s — 非流式超时更宽容
+const NATIVE_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']);
 
 // 连续 3 次超时才提醒压缩上下文，计数按 API Key 隔离。
 const TIMEOUT_REDUCE_CONTEXT_THRESHOLD = 3;
@@ -406,6 +416,39 @@ function readBody(req) {
   });
 }
 
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const declaredSize = Number.parseInt(req.headers['content-length'] || '0', 10);
+    if (Number.isFinite(declaredSize) && declaredSize > MAX_BODY_SIZE) {
+      const error = new Error('Request body exceeds 10MB limit');
+      error.status = 413;
+      req.resume();
+      reject(error);
+      return;
+    }
+
+    const chunks = [];
+    let totalSize = 0;
+    let rejected = false;
+    req.on('data', chunk => {
+      if (rejected) return;
+      totalSize += chunk.length;
+      if (totalSize > MAX_BODY_SIZE) {
+        rejected = true;
+        const error = new Error('Request body exceeds 10MB limit');
+        error.status = 413;
+        reject(error);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (!rejected) resolve(Buffer.concat(chunks));
+    });
+    req.on('error', reject);
+  });
+}
+
 function sendJSON(res, status, data) {
   const headers = { 'Content-Type': 'application/json' };
   if (data && data.retry_after !== undefined) {
@@ -413,6 +456,64 @@ function sendJSON(res, status, data) {
   }
   res.writeHead(status, headers);
   res.end(JSON.stringify(data));
+}
+
+async function handleNativeCommandCode(req, res, url) {
+  if (!NATIVE_METHODS.has(req.method)) {
+    res.setHeader('Allow', [...NATIVE_METHODS].join(', '));
+    sendJSON(res, 405, { error: { message: 'Method not allowed', type: 'method_not_allowed' } });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRawBody(req);
+  } catch (error) {
+    if (error.status === 413) {
+      // 超限后不再允许客户端继续占用连接发送数据，响应写完就主动断开。
+      res.setHeader('Connection', 'close');
+      res.once('finish', () => req.destroy());
+    }
+    sendJSON(res, error.status || 400, {
+      error: { message: error.message, type: 'invalid_request_error' },
+    });
+    return;
+  }
+
+  const abortController = new AbortController();
+  req.once('aborted', () => abortController.abort());
+  res.once('close', () => {
+    if (!res.writableEnded) abortController.abort();
+  });
+
+  try {
+    const upstream = await forwardNativeToCC({
+      apiBase: CFG.apiBase,
+      method: req.method,
+      requestUrl: `${url.pathname}${url.search}`,
+      headers: req.headers,
+      body,
+      signal: abortController.signal,
+    });
+    const responseHeaders = filterProxyHeaders(upstream.headers);
+    for (const [name, value] of Object.entries(responseHeaders)) {
+      if (value !== undefined) res.setHeader(name, value);
+    }
+    res.writeHead(upstream.statusCode || 502, upstream.statusMessage);
+    await pipeline(upstream, res);
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    log('error', 'Native CC proxy error', {
+      method: req.method,
+      path: url.pathname,
+      error: error.message,
+    });
+    if (!res.headersSent) {
+      sendJSON(res, 502, { error: { message: 'Command Code upstream unavailable', type: 'proxy_error' } });
+    } else if (!res.destroyed) {
+      res.destroy(error);
+    }
+  }
 }
 
 function getApiKey(headers) {
@@ -1329,7 +1430,7 @@ function handleHealth(req, res) {
 const server = http.createServer(async (req, res) => {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -1349,12 +1450,39 @@ const server = http.createServer(async (req, res) => {
       await handleModels(req, res);
     } else if (url.pathname === '/health' || url.pathname === '/') {
       handleHealth(req, res);
+    } else if (isCommandCodeNativePath(url.pathname)) {
+      await handleNativeCommandCode(req, res, url);
     } else {
       sendJSON(res, 404, { error: { message: 'Not found', type: 'not_found' } });
     }
   } catch (e) {
-    sendJSON(res, 500, { error: { message: e.message, type: 'internal_error' } });
+    if (!res.headersSent) sendJSON(res, 500, { error: { message: e.message, type: 'internal_error' } });
+    else if (!res.destroyed) res.destroy(e);
   }
+});
+
+server.on('upgrade', (req, socket, head) => {
+  let url;
+  try {
+    url = new URL(req.url, 'http://proxy.invalid');
+  } catch {
+    socket.destroy();
+    return;
+  }
+
+  if (!isCommandCodeNativePath(url.pathname)) {
+    socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    return;
+  }
+
+  // WebSocket 只建立到固定的 Command Code API origin，path/query 原样转交。
+  tunnelNativeWebSocket({
+    apiBase: CFG.apiBase,
+    requestUrl: `${url.pathname}${url.search}`,
+    headers: req.headers,
+    clientSocket: socket,
+    clientHead: head,
+  });
 });
 
 // 全局兜底：abort 触发的异步 rejection 不会让进程崩溃

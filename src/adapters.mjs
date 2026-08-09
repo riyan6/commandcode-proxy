@@ -33,6 +33,16 @@ function textFromContent(content) {
     .join('');
 }
 
+function toolOutputFromContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return content == null ? '' : String(content);
+  // 1.15.1 CLI 会保留工具结果中各文本块的边界，用换行拼接后再发送给上游。
+  return content
+    .filter(part => part?.type === 'text')
+    .map(part => part.text || '')
+    .join('\n');
+}
+
 function imagePartToWire(part) {
   const url = part.image_url?.url || part.image || '';
   if (!url) return null;
@@ -104,7 +114,7 @@ function buildWireMessages(messages) {
               toolName: '',
               output: {
                 type: 'text',
-                value: textFromContent(part.content ?? part.output),
+                value: toolOutputFromContent(part.content ?? part.output),
               },
             });
           } else {
@@ -118,7 +128,7 @@ function buildWireMessages(messages) {
       continue;
     }
 
-    // 旧版 OpenAI 客户端可能使用 function 角色，统一转换为 1.7.0 的 tool。
+    // 旧版 OpenAI 客户端可能使用 function 角色，统一转换为 1.15.1 的 tool。
     if (message.role === 'tool' || message.role === 'function') {
       wireMessages.push({
         role: 'tool',
