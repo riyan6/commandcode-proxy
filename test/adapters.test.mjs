@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCcRequest } from '../src/adapters.mjs';
+import { buildCcRequest, normalizeUsage, getCacheReadTokens } from '../src/adapters.mjs';
 
-test('请求体与 command-code 1.15.1 的 CLI 信封和工具格式一致', () => {
+test('请求体与 command-code 1.31.0 的 CLI 信封和工具格式一致', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [
@@ -44,7 +44,8 @@ test('请求体与 command-code 1.15.1 的 CLI 信封和工具格式一致', () 
   assert.equal(body.params.tools[0].type, undefined);
   assert.equal(body.params.messages[0].content[1].mimeType, 'image/png');
   assert.equal(body.params.messages[1].content[1].type, 'tool-call');
-  assert.equal(body.params.messages[2].content[0].toolName, '');
+  // 1.31.0 的 toWireMessages 会回填 toolName。
+  assert.equal(body.params.messages[2].content[0].toolName, 'lookup');
   assert.deepEqual(body.params.messages.map(message => message.role), ['user', 'assistant', 'tool']);
   assert.ok(body.params.messages.every(message => Array.isArray(message.content)));
 });
@@ -70,7 +71,7 @@ test('兼容 Agent 的 developer 和旧式 function 消息格式', () => {
   assert.equal(body.params.messages[2].content[0].type, 'tool-result');
 });
 
-test('工具结果的多个文本块按 command-code 1.15.1 格式用换行拼接', () => {
+test('工具结果的多个文本块按 command-code 1.31.0 格式用换行拼接', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [{
@@ -88,4 +89,32 @@ test('工具结果的多个文本块按 command-code 1.15.1 格式用换行拼�
   });
 
   assert.equal(body.params.messages[0].content[0].output.value, '第一行\n第二行');
+});
+
+test('1.31.0 tool-result 找不到对应工具名时回填 unknown', () => {
+  const body = buildCcRequest({
+    model: 'demo-model',
+    messages: [
+      { role: 'assistant', content: '调用工具', tool_calls: [{
+        id: 'call_a',
+        function: { name: 'known_tool', arguments: '{}' },
+      }] },
+      { role: 'tool', tool_call_id: 'call_unknown', content: '结果' },
+    ],
+  });
+
+  const toolResults = body.params.messages.filter(message => message.role === 'tool');
+  assert.equal(toolResults[0].content[0].toolCallId, 'call_unknown');
+  // 1.31.0 的 toWireMessages：未匹配到工具名时用 "unknown"。
+  assert.equal(toolResults[0].content[0].toolName, 'unknown');
+});
+
+test('1.31.0 usage 的缓存字段在 inputTokenDetails.cacheReadTokens', () => {
+  const usage = { inputTokens: 10, outputTokens: 5, inputTokenDetails: { cacheReadTokens: 8 } };
+  assert.equal(getCacheReadTokens(usage), 8);
+  normalizeUsage(usage);
+  assert.equal(usage.cachedInputTokens, 8);
+
+  // 兼容老版本顶层 cachedInputTokens。
+  assert.equal(getCacheReadTokens({ inputTokens: 1, outputTokens: 1, cachedInputTokens: 3 }), 3);
 });

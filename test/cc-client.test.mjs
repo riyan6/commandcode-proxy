@@ -27,13 +27,13 @@ test('HTTP 透传移除逐跳头和 Connection 声明的扩展头', () => {
     'proxy-connection': 'keep-alive',
     'set-cookie': ['session=upstream'],
     authorization: 'Bearer user_example',
-    'x-command-code-version': '1.15.1',
+    'x-command-code-version': '1.31.0',
   });
 
   assert.deepEqual(headers, {
     cookie: 'session=native-client',
     'set-cookie': ['session=upstream'],
     authorization: 'Bearer user_example',
-    'x-command-code-version': '1.15.1',
+    'x-command-code-version': '1.31.0',
   });
 });

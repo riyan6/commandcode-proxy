@@ -4,7 +4,7 @@
 
 将 Command Code API 转换为 OpenAI / Anthropic 兼容接口的反代代理。Node.js ESM 实现，零外部依赖。
 
-基于本机 `command-code@1.15.1` CLI bundle 的分析，对齐 Command Code API 请求协议，并实现多层兼容适配。
+基于本机 `command-code@1.31.0` CLI bundle 的分析，对齐 Command Code API 请求协议，并实现多层兼容适配。
 
 **完整功能**：Command Code 原生 HTTP/WebSocket 透传 | OpenAI Chat Completions + Anthropic Messages API | 流式/非流式输出 | 工具调用 (tool_use) | 多模态图片输入 | 推理强度 (reasoning_effort) | 动态模型列表 | 缓存命中指标 | 客户端断连检测（上游中止） | 零输出 → 429 自动重试 | 连续超时 → 429 自动重试 | 隐私保护日志
 
@@ -25,6 +25,16 @@ curl http://127.0.0.1:3050/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
+
+### 全局请求头校验
+
+除 `OPTIONS` 预检、`GET /v1/models`、`GET /health` 和 `/` 外，**所有请求都必须携带**格式正确的 `Authorization: Bearer user_...` 头（代理只判断是否携带且格式正确，不向后端校验 Key 有效性）。未携带时返回：
+
+```json
+{"success":false,"error":{"code":"UNAUTHORIZED","status":401,"message":"Invalid 'Authorization' header or token.","docs":"https://commandcode.ai/docs/reference/errors/unauthorized"}}
+```
+
+适用于 `/v1/chat/completions`、`/v1/messages`、原生透传路径和 WebSocket 升级。
 
 ## 文件结构
 
@@ -52,14 +62,14 @@ commandcode/
 | `port` | `3050` | 监听端口 |
 | `host` | `0.0.0.0` | 监听地址 |
 | `apiBase` | `https://api.commandcode.ai` | CC API 地址 |
-| `protocolVersion` | `1.15.1` | 请求协议实现基线，不控制发送给上游的版本头 |
+| `protocolVersion` | `1.31.0` | 请求协议实现基线，同时作为 `x-command-code-version` 头发送 |
 | `cliEnvironment` | `production` | `x-cli-environment` 请求头 |
 | `userAgent` | `cli` | CLI 请求 User-Agent |
 | `projectSlug` | `cc-proxy` | `x-project-slug` header |
 | `mode` | `agent` | CC CLI 请求模式，可选 `agent`、`learning`、`custom-agent`、`custom-agent-create`、`title-gen`、`tool-desc`、`compact`、`vision` |
 | `permissionMode` | `standard` | CC 权限模式 |
 | `tasteLearningEnabled` | `false` | `x-taste-learning` 开关 |
-| `oauthEnforced` | `false` | `x-co-flag` 开关 |
+| `oauthEnforced` | `false` | 旧版 `x-co-flag` 开关（1.31.0 已移除该头，保留配置仅为兼容） |
 | `cmdZdr` | `false` | 是否发送 `x-cmd-zdr: 1` |
 | `fingerprintSalt` | `""` | 指纹派生盐，生产环境建议通过环境变量设置 |
 | `logFile` | `""` | 日志文件路径（空=仅控制台） |
@@ -262,14 +272,14 @@ data: {"type":"message_stop"}
 
 ### Command Code 原生透传
 
-代理会在相同路径透传 Command Code 原生 API。`/alpha/*`、`/provider/*` 以及 1.15.1 bundle 声明的 `/beta/*`、`/internal/*` 会被发送到固定的 `apiBase`；其他路径不会转发，因此它不是任意 URL 代理。
+代理会在相同路径透传 Command Code 原生 API。`/alpha/*`、`/provider/*` 以及 1.31.0 bundle 声明的 `/beta/*`、`/internal/*` 会被发送到固定的 `apiBase`；其他路径不会转发，因此它不是任意 URL 代理。
 
 原生接口保留 HTTP method、query、请求体原始字节、认证/OAuth/Cookie 请求头、上游状态码、响应头和响应流。只移除 `Host`、`Connection`、`Transfer-Encoding` 等逐跳头；3xx 响应不会自动跟随。请求体上限仍为 10MB。生产部署建议为原生入口使用专用域名，避免与其他 Web 应用共享 Cookie。
 
 ```bash
 curl http://127.0.0.1:3050/alpha/whoami \
   -H "Authorization: Bearer user_xxxxxxxxx" \
-  -H "x-command-code-version: 1.15.1"
+  -H "x-command-code-version: 1.31.0"
 ```
 
 `POST /alpha/generate` 会返回原生逐行 JSON（NDJSON），不会转换为 OpenAI SSE。沙箱实时通道使用相同路径的 WebSocket 隧道，例如 `ws://127.0.0.1:3050/alpha/sandbox/stream/...`。外部 OAuth、npm 更新、遥测和用户自定义 MCP 地址不属于 Command API origin，不会被这个入口代理。
@@ -279,7 +289,7 @@ curl http://127.0.0.1:3050/alpha/whoami \
 | HTTP 状态 | 说明 |
 |-----------|------|
 | 400 | 请求格式错误 |
-| 401 | API Key 缺失/格式不对/无效（Key 必须以 `user_` 开头） |
+| 401 | 未携带 `Authorization: Bearer user_...` 请求头（返回标准 UNAUTHORIZED JSON，见上文） |
 | 429 | 流空闲超时（30s 流式 / 90s 非流式，SDK 自动重试，连续 3 次：提示压缩上下文） |
 | 502 | 零输出 token 或 CC 上游错误 |
 | 503 | 服务暂时不可用 |
@@ -371,15 +381,17 @@ print(message.content[0].text)
 
 ## 反检测
 
-基于对本机 `command-code@1.15.1` bundle 的分析，实现了以下兼容适配：
+基于对本机 `command-code@1.31.0` bundle 的分析，实现了以下兼容适配：
 
 | 机制 | 实现 |
 |------|------|
 | **按 Key 分 Session** | 每个 API Key 独立 session，12h 过期 + 1h 随机抖动 |
-| **协议基线 / 动态版本头** | 请求协议按 `1.15.1` 实现；`x-command-code-version` 每 24 小时从 npm latest 刷新，失败时回退到 `1.15.1` |
+| **协议基线 / 版本头** | 请求协议与 `x-command-code-version` 都固定为 `1.31.0`（`protocolVersion`）；不再跟随 npm latest，发送的版本号始终与实现一致 |
 | **CLI 信封格式** | config/memory/taste/skills/permissionMode/mode/params/threadId |
-| **工具与图片格式** | 工具字段、base64 图片和 mimeType 对齐最新版 wire format |
+| **工具与图片格式** | 工具字段、base64 图片和 mimeType 对齐最新版 wire format；tool-result 回填 toolName |
 | **流式续接** | `pause_turn` 最多按同一请求线程继续两次 |
+| **服务端工具结果** | 1.31.0 的 `tool-result` 事件（provider 执行）对 OpenAI/Anthropic 客户端静默跳过 |
+| **上游 abort** | 1.31.0 的 `abort` 事件视为正常结束 |
 | **稳定指纹** | 按 API Key 派生最新版 CLI 所需的指纹字段，重启后保持稳定 |
 | **OpenTelemetry** | `traceparent` (W3C Trace Context) |
 | **环境标识** | `x-cli-environment: production` |
@@ -418,6 +430,7 @@ print(message.content[0].text)
     "model": "deepseek/deepseek-v4-flash",
     "messages": [...],
     "tools": [],
+    "system": "系统提示（可选）",
     "max_tokens": 64000,
     "stream": true,
     "reasoning_effort": "max"

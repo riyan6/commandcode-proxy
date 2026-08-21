@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Command Code → OpenAI 兼容代理
  * 基于真实 CLI 流量抓包数据构建
  */
@@ -30,12 +30,10 @@ import {
 
 const CFG = loadConfig();
 
-// 请求体和字段转换固定按 command-code@1.15.1 实现，避免协议随上游版本漂移。
-const PROTOCOL_VERSION = CFG.protocolVersion;
-
-// 发给上游的 CLI 版本头单独跟随 npm latest，启动时刷新，之后每 24 小时刷新一次。
-let CC_VERSION = PROTOCOL_VERSION;
-const CC_VERSION_REFRESH_MS = 24 * 60 * 60 * 1000;
+// 请求体和字段转换固定按 command-code@1.31.0 实现，避免协议随上游版本漂移。
+// 发送给上游的 x-command-code-version 头与实现基线保持一致（protocolVersion），
+// 不再跟随 npm latest，避免“头版本新但特性旧”被后端识别出代理伪装。
+const CC_VERSION = CFG.protocolVersion;
 
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB — 请求体大小上限
 const STREAM_IDLE_TIMEOUT_MS = 30000;   // 30s — 流式无新数据中断
@@ -71,40 +69,7 @@ function getTimeoutMessage(apiKey) {
     : 'Response timeout - request timed out';
 }
 
-async function refreshCCVersion() {
-  try {
-    const response = await fetch('https://registry.npmjs.org/command-code/latest', {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!response.ok) throw new Error(`npm responded with ${response.status}`);
-
-    const packageInfo = await response.json();
-    if (typeof packageInfo.version !== 'string' || !packageInfo.version.trim()) {
-      throw new Error('npm latest response has no valid version');
-    }
-
-    CC_VERSION = packageInfo.version.trim();
-    log('info', 'CC version refreshed from npm', {
-      version: CC_VERSION,
-      protocolVersion: PROTOCOL_VERSION,
-    });
-  } catch (error) {
-    // 网络不可用时保留最近一次成功版本；首次失败则回退到协议基线。
-    log('warn', 'CC version fetch failed, using last known version', {
-      version: CC_VERSION,
-      protocolVersion: PROTOCOL_VERSION,
-      error: error.message,
-    });
-  }
-}
-
-// 不阻塞代理启动，版本刷新失败也不影响已经固定的协议实现。
-refreshCCVersion();
-const ccVersionRefreshTimer = setInterval(refreshCCVersion, CC_VERSION_REFRESH_MS);
-ccVersionRefreshTimer.unref?.();
-
-// ── 初始化预请求（fingerprint + lifecycle，首次 + 每 8h+2h 抖动） ────
+// ── 初始化预请求（fingerprint，首次 + 每 8h+2h 抖动） ────
 const INIT_REFRESH_MS = 8 * 60 * 60 * 1000;    // 8h
 const INIT_JITTER_MS  = 2 * 60 * 60 * 1000;    // 2h 抖动
 
@@ -114,7 +79,9 @@ async function ensureInitialized(apiKey, signal, incomingHeaders = {}) {
   if (now < keyState.nextInitAt) return;
 
   try {
-    // 指纹、生命周期和生成请求使用同一会话标识及公共 CLI 请求头。
+    // 指纹和生成请求使用同一会话标识及公共 CLI 请求头。
+    // 1.31.0 已移除 /alpha/lifecycle-events 端点（改为 telemetry 内部事件），
+    // 这里只保留 fingerprint/record 初始化。
     const sessionId = state.getSessionId(incomingHeaders, apiKey);
     const headers = buildCommandCodeHeaders({
       apiKey,
@@ -131,42 +98,19 @@ async function ensureInitialized(apiKey, signal, incomingHeaders = {}) {
     });
     const fingerprint = keyState.fingerprint || {};
 
-    await Promise.all([
-      fetch(`${CFG.apiBase}/alpha/fingerprint/record`, {
-        method: 'POST', headers, signal,
-        body: JSON.stringify(fingerprint),
-      }).then(r => {
-        if (!r.ok) log('warn', 'Fingerprint record failed', { status: r.status });
-        else log('info', 'Fingerprint recorded');
-      }).catch(e => {
-        if (e.name !== 'AbortError') log('warn', 'Fingerprint record error', { error: e.message });
-      }),
-
-      fetch(`${CFG.apiBase}/alpha/lifecycle-events`, {
-        method: 'POST', headers, signal,
-        body: JSON.stringify({
-          eventType: 'cli_session_exists',
-          metadata: {
-            sessionId,
-            cliVersion: CC_VERSION,
-            mode: CFG.mode,
-            os: `${fingerprint.components.platform}-${fingerprint.components.arch}`,
-          },
-        }),
-      }).then(r => {
-        if (!r.ok) log('warn', 'Lifecycle event failed', { status: r.status });
-        else log('info', 'Lifecycle event sent');
-      }).catch(e => {
-        if (e.name !== 'AbortError') log('warn', 'Lifecycle event error', { error: e.message });
-      }),
-    ]);
+    const response = await fetch(`${CFG.apiBase}/alpha/fingerprint/record`, {
+      method: 'POST', headers, signal,
+      body: JSON.stringify(fingerprint),
+    });
+    if (!response.ok) log('warn', 'Fingerprint record failed', { status: response.status });
+    else log('info', 'Fingerprint recorded');
 
     // 成功：8h + 2h 随机抖动
     const jitter = Math.floor(Math.random() * INIT_JITTER_MS);
     keyState.nextInitAt = Date.now() + INIT_REFRESH_MS + jitter;
-    log('info', 'Fingerprint/lifecycle next refresh', { nextIn: `${(INIT_REFRESH_MS + jitter) / 3600000}h` });
+    log('info', 'Fingerprint next refresh', { nextIn: `${(INIT_REFRESH_MS + jitter) / 3600000}h` });
   } catch (e) {
-    if (e.name !== 'AbortError') log('warn', 'Fingerprint/lifecycle refresh error, will retry next request', { error: e.message });
+    if (e.name !== 'AbortError') log('warn', 'Fingerprint refresh error, will retry next request', { error: e.message });
   }
 }
 
@@ -174,6 +118,16 @@ async function ensureInitialized(apiKey, signal, incomingHeaders = {}) {
 
 function nowUnix() {
   return Math.floor(Date.now() / 1000);
+}
+
+// 从 1.31.0 的 usage 对象读取缓存输入 token。
+// finish 事件的 totalUsage.inputTokenDetails.cacheReadTokens 是权威字段，
+// 老版本用顶层的 cachedInputTokens，这里都兼容。
+function getCachedInputTokens(usage) {
+  if (!usage) return 0;
+  const details = usage.inputTokenDetails;
+  if (details && details.cacheReadTokens !== undefined) return details.cacheReadTokens;
+  return usage.cachedInputTokens ?? 0;
 }
 
 function getThreadId(headers = {}, request = {}) {
@@ -199,6 +153,7 @@ function createSseTranslator(model, completionId, created) {
   let segmentFinished = false;
   let pauseTurn = false;
   let streamError = false;
+  let upstreamAborted = false;
 
   return {
     lastCcEvent: '',
@@ -266,7 +221,9 @@ function createSseTranslator(model, completionId, created) {
           if (event.providerExecuted) break;
           const id = event.toolCallId || `call_${Date.now()}_${toolCallIndex}`;
           const name = event.toolName || '';
-          const args = typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {});
+          // 1.31.0 的 tool-call 事件同时支持 input 或 args 字段。
+          const rawInput = event.input ?? event.args;
+          const args = typeof rawInput === 'string' ? rawInput : JSON.stringify(rawInput || {});
           const tcEntry = { index: toolCallIndex, id, type: 'function', function: { name, arguments: args } };
           const delta = chunkIndex === 0
             ? { role: 'assistant', content: null, tool_calls: [tcEntry] }
@@ -277,13 +234,20 @@ function createSseTranslator(model, completionId, created) {
           break;
         }
 
+        // 1.31.0 新增：服务端直接执行的工具结果。OpenAI 协议没有对应概念，
+        // 静默跳过，避免污染下游的 tool_calls 序列。
+        case 'tool-result': {
+          if (!event.providerExecuted) break;
+          break;
+        }
+
         case 'finish-step': {
           if (event.finishReason) finishReason = mapFinishReason(event.finishReason);
           if (event.usage) {
             usage = event.usage;
             this.inputTokens = event.usage.inputTokens ?? 0;
             this.outputTokens = event.usage.outputTokens ?? 0;
-            this.cachedInputTokens = event.usage.cachedInputTokens ?? 0;
+            this.cachedInputTokens = getCachedInputTokens(event.usage);
           }
           break;
         }
@@ -294,7 +258,7 @@ function createSseTranslator(model, completionId, created) {
           normalizeUsage(u);
           this.inputTokens = u.inputTokens ?? 0;
           this.outputTokens = u.outputTokens ?? 0;
-          this.cachedInputTokens = u.cachedInputTokens ?? 0;
+          this.cachedInputTokens = getCachedInputTokens(u);
           if (rawFinishReason === 'pause_turn') {
             // 不向下游暴露中间 pause_turn，外层会按最新版 CLI 继续请求。
             pauseTurn = true;
@@ -307,7 +271,7 @@ function createSseTranslator(model, completionId, created) {
             prompt_tokens: u.inputTokens ?? 0,
             completion_tokens: u.outputTokens ?? 0,
             total_tokens: (u.inputTokens ?? 0) + (u.outputTokens ?? 0),
-            prompt_tokens_details: { cached_tokens: u.cachedInputTokens ?? 0 },
+            prompt_tokens_details: { cached_tokens: getCachedInputTokens(u) },
           } : undefined;
           out.push(makeChunk(completionId, created, model, {}, fr, openaiUsage));
           break;
@@ -320,6 +284,15 @@ function createSseTranslator(model, completionId, created) {
           // Don't emit a finish_reason chunk — let the natural stream termination
           // handle it. Otherwise a subsequent finish(tool_calls) would be ignored
           // by downstream agent loops that stop at the first finish_reason.
+          break;
+        }
+
+        // 1.31.0：abort 事件表示上游主动终止，视为正常结束。
+        case 'abort': {
+          segmentFinished = true;
+          upstreamAborted = true;
+          // abort 是合法终止，不算零输出；有文本输出时避免触发零输出防护。
+          if (chunkIndex > 0 && !this.outputTokens) this.outputTokens = 1;
           break;
         }
 
@@ -525,6 +498,28 @@ function getApiKey(headers) {
   return match[0];
 }
 
+// ── 全局鉴权 ────────────────────────────────────────
+// 除豁免路径外，所有请求都必须携带 Authorization: Bearer user_xxx 头。
+// 只判断“是否携带正确格式的请求头”，不校验 Key 有效性（有效性与否由 CC 后端判断）。
+const UNAUTHORIZED_BODY = {
+  success: false,
+  error: {
+    code: 'UNAUTHORIZED',
+    status: 401,
+    message: "Invalid 'Authorization' header or token.",
+    docs: 'https://commandcode.ai/docs/reference/errors/unauthorized',
+  },
+};
+
+// 豁免路径：模型列表（匿名可访问）、健康检查、根路径。
+function isAuthExemptPath(pathname) {
+  return pathname === '/v1/models' || pathname === '/health' || pathname === '/';
+}
+
+function sendUnauthorized(res) {
+  sendJSON(res, 401, UNAUTHORIZED_BODY);
+}
+
 // ── 路由 ────────────────────────────────────────────
 
 async function handleChatCompletions(req, res) {
@@ -572,7 +567,7 @@ async function handleChatCompletions(req, res) {
   let partialOutputLength = 0;
 
   try {
-    // 首次初始化（fingerprint + lifecycle）
+    // 首次初始化（fingerprint）
     await ensureInitialized(apiKey, abortController.signal, req.headers);
     // 转发到 CC API（传入客户端 headers，用于提取 session ID）
     const forwardRequest = () => forwardToCC({
@@ -819,7 +814,10 @@ async function handleChatCompletions(req, res) {
                   type: 'function',
                   function: {
                     name: event.toolName || '',
-                    arguments: typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {}),
+                    // 1.31.0 的 tool-call 事件同时支持 input 或 args 字段。
+                    arguments: typeof (event.input ?? event.args) === 'string'
+                      ? (event.input ?? event.args)
+                      : JSON.stringify(event.input ?? event.args ?? {}),
                   },
                 });
                 break;
@@ -838,6 +836,17 @@ async function handleChatCompletions(req, res) {
                 lastCcEvent = event.type;
                 streamError = true;
                 log('warn', 'CC stream error (non-stream)', { message: event.error?.message || event.message });
+                break;
+              // 1.31.0 新增：服务端直接执行的工具结果。OpenAI 协议没有对应概念，静默跳过。
+              case 'tool-result':
+                lastCcEvent = event.type;
+                break;
+              // 1.31.0：abort 事件表示上游主动终止，视为正常结束。
+              case 'abort':
+                lastCcEvent = event.type;
+                sawFinish = true;
+                // abort 是合法终止，不算零输出；有文本时避免触发零输出防护。
+                if (fullText && !usage) usage = { inputTokens: 0, outputTokens: 1 };
                 break;
               case 'reasoning-end': case 'provider-metadata': case 'tool-input-start': case 'tool-input-delta': case 'tool-input-end': case 'tool-error': case 'text-end':
                 // Silent - no user-visible content
@@ -922,7 +931,7 @@ async function handleChatCompletions(req, res) {
         prompt_tokens: usage.inputTokens ?? 0,
         completion_tokens: usage.outputTokens ?? 0,
         total_tokens: (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0),
-        prompt_tokens_details: { cached_tokens: usage.cachedInputTokens ?? 0 },
+        prompt_tokens_details: { cached_tokens: getCachedInputTokens(usage) },
       };
     })(),
       });
@@ -1008,7 +1017,7 @@ async function handleMessages(req, res) {
 
   try {
     let reader = null;
-    // 首次初始化（fingerprint + lifecycle）
+    // 首次初始化（fingerprint）
     await ensureInitialized(apiKey, abortController.signal, req.headers);
     const forwardRequest = () => forwardToCC({
       apiBase: CFG.apiBase,
@@ -1222,7 +1231,10 @@ async function handleMessages(req, res) {
                   type: 'function',
                   function: {
                     name: event.toolName || '',
-                    arguments: typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {}),
+                    // 1.31.0 的 tool-call 事件同时支持 input 或 args 字段。
+                    arguments: typeof (event.input ?? event.args) === 'string'
+                      ? (event.input ?? event.args)
+                      : JSON.stringify(event.input ?? event.args ?? {}),
                   },
                 });
                 break;
@@ -1241,6 +1253,17 @@ async function handleMessages(req, res) {
                 lastCcEvent = event.type;
                 streamError = true;
                 log('warn', 'CC error (Anthropic non-stream)', { message: event.error?.message || event.message });
+                break;
+              // 1.31.0 新增：服务端直接执行的工具结果。Anthropic 协议没有对应概念，静默跳过。
+              case 'tool-result':
+                lastCcEvent = event.type;
+                break;
+              // 1.31.0：abort 事件表示上游主动终止，视为正常结束。
+              case 'abort':
+                lastCcEvent = event.type;
+                sawFinish = true;
+                // abort 是合法终止，不算零输出；有文本时避免触发零输出防护。
+                if (fullText && !usage) usage = { inputTokens: 0, outputTokens: 1 };
                 break;
               case 'reasoning-end': case 'provider-metadata': case 'tool-input-start': case 'tool-input-delta': case 'tool-input-end': case 'tool-error': case 'text-end':
                 // Silent - no user-visible content
@@ -1441,6 +1464,12 @@ const server = http.createServer(async (req, res) => {
   const host = req.headers.host || 'localhost';
   const url = new URL(req.url, `http://${host}`);
 
+  // 全局请求头校验：除豁免路径外都必须携带 Authorization 头，否则返回 UNAUTHORIZED。
+  if (!isAuthExemptPath(url.pathname) && !getApiKey(req.headers)) {
+    sendUnauthorized(res);
+    return;
+  }
+
   try {
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
       await handleChatCompletions(req, res);
@@ -1472,6 +1501,12 @@ server.on('upgrade', (req, socket, head) => {
 
   if (!isCommandCodeNativePath(url.pathname)) {
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    return;
+  }
+
+  // WebSocket 隧道同样要求携带 Authorization 头。
+  if (!getApiKey(req.headers)) {
+    socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
     return;
   }
 

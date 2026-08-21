@@ -4,7 +4,7 @@
 
 A reverse proxy that converts Command Code API to OpenAI / Anthropic compatible endpoints. Node.js ESM with zero external dependencies.
 
-Built by analyzing the local `command-code@1.15.1` CLI bundle and aligning the Command Code API request protocol.
+Built by analyzing the local `command-code@1.31.0` CLI bundle and aligning the Command Code API request protocol.
 
 **Features**: Native Command Code HTTP/WebSocket pass-through | OpenAI Chat Completions + Anthropic Messages API | Streaming & non-streaming | Tool calling (tool_use) | Multimodal image input | Reasoning effort | Dynamic model list | Cache hit metrics | Client disconnect detection with upstream abort | Zero-output → 429 auto-retry | Consecutive timeout → 429 auto-retry | Privacy-aware logging
 
@@ -25,6 +25,16 @@ curl http://127.0.0.1:3050/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
+
+### Global auth header check
+
+Every request except `OPTIONS` preflight, `GET /v1/models`, `GET /health` and `/` **must carry** a valid-format `Authorization: Bearer user_...` header (the proxy only checks that the header is present and well-formed — it does not validate the key against the backend). Requests without it return:
+
+```json
+{"success":false,"error":{"code":"UNAUTHORIZED","status":401,"message":"Invalid 'Authorization' header or token.","docs":"https://commandcode.ai/docs/reference/errors/unauthorized"}}
+```
+
+This applies to `/v1/chat/completions`, `/v1/messages`, native pass-through paths and WebSocket upgrades.
 
 ## File Structure
 
@@ -52,14 +62,14 @@ commandcode/
 | `port` | `3050` | Listen port |
 | `host` | `0.0.0.0` | Listen address |
 | `apiBase` | `https://api.commandcode.ai` | CC API base URL |
-| `protocolVersion` | `1.15.1` | Protocol implementation baseline; does not control the version header |
+| `protocolVersion` | `1.31.0` | Protocol implementation baseline; also sent as the `x-command-code-version` header |
 | `cliEnvironment` | `production` | `x-cli-environment` header |
 | `userAgent` | `cli` | CLI User-Agent |
 | `projectSlug` | `cc-proxy` | `x-project-slug` header |
 | `mode` | `agent` | CC CLI request mode (`agent`, `learning`, `custom-agent`, `custom-agent-create`, `title-gen`, `tool-desc`, `compact`, or `vision`) |
 | `permissionMode` | `standard` | CC permission mode |
 | `tasteLearningEnabled` | `false` | `x-taste-learning` switch |
-| `oauthEnforced` | `false` | `x-co-flag` switch |
+| `oauthEnforced` | `false` | Legacy `x-co-flag` switch (removed in 1.31.0; kept for config compatibility) |
 | `cmdZdr` | `false` | Send `x-cmd-zdr: 1` when enabled |
 | `fingerprintSalt` | `""` | Salt for stable per-key fingerprint derivation |
 | `logFile` | `""` | Log file path (empty = console only) |
@@ -262,14 +272,14 @@ Health check. Returns `OK`.
 
 ### Native Command Code Pass-Through
 
-The proxy forwards native Command Code API requests on the same path. `/alpha/*`, `/provider/*`, and the `/beta/*` and `/internal/*` namespaces declared by the 1.15.1 bundle are sent only to the configured `apiBase`. Other paths are not forwarded, so this is not an arbitrary URL proxy.
+The proxy forwards native Command Code API requests on the same path. `/alpha/*`, `/provider/*`, and the `/beta/*` and `/internal/*` namespaces declared by the 1.31.0 bundle are sent only to the configured `apiBase`. Other paths are not forwarded, so this is not an arbitrary URL proxy.
 
 Native requests preserve the HTTP method, query, raw body bytes, authentication/OAuth/cookie headers, upstream status, response headers, and response stream. Only hop-by-hop headers such as `Host`, `Connection`, and `Transfer-Encoding` are removed; 3xx responses are not followed automatically. The 10MB request limit still applies. Use a dedicated hostname for the native endpoint in production so it does not share cookies with unrelated web applications.
 
 ```bash
 curl http://127.0.0.1:3050/alpha/whoami \
   -H "Authorization: Bearer user_xxxxxxxxx" \
-  -H "x-command-code-version: 1.15.1"
+  -H "x-command-code-version: 1.31.0"
 ```
 
 `POST /alpha/generate` returns the native newline-delimited JSON stream without converting it to OpenAI SSE. Sandbox real-time connections use a WebSocket tunnel on the same path, such as `ws://127.0.0.1:3050/alpha/sandbox/stream/...`. External OAuth, npm updates, telemetry, and user-configured MCP origins are outside the Command API origin and are not proxied by this endpoint.
@@ -279,7 +289,7 @@ curl http://127.0.0.1:3050/alpha/whoami \
 | HTTP Status | Description |
 |-------------|-------------|
 | 400 | Invalid request format |
-| 401 | API Key missing / invalid format / rejected (Key must start with `user_`) |
+| 401 | Missing `Authorization: Bearer user_...` header (returns the standard UNAUTHORIZED JSON, see above) |
 | 429 | Stream idle timeout (30s streaming / 90s non-streaming, SDK auto-retry, consecutive 3: reduce context hint) |
 | 502 | Zero output tokens or CC upstream error |
 | 503 | Service temporarily unavailable |
@@ -371,15 +381,17 @@ print(message.content[0].text)
 
 ## Anti-Detection
 
-Based on analysis of the local `command-code@1.15.1` bundle:
+Based on analysis of the local `command-code@1.31.0` bundle:
 
 | Mechanism | Implementation |
 |-----------|---------------|
 | **Per-Key Session** | One session per API key, 12h expiry + 1h random jitter |
-| **Protocol Baseline / Dynamic Header** | Request envelope is implemented against `1.15.1`; `x-command-code-version` refreshes from npm latest every 24h and falls back to `1.15.1` |
+| **Protocol Baseline / Version Header** | Request envelope and `x-command-code-version` are both pinned to `1.31.0` (`protocolVersion`); no longer follows npm latest, so the advertised version always matches the implemented protocol |
 | **CLI Envelope** | config/memory/taste/skills/permissionMode/mode/params/threadId |
-| **Tools & Images** | Latest wire format for tools, base64 images and mimeType |
+| **Tools & Images** | Latest wire format for tools, base64 images and mimeType; tool-result now backfills `toolName` |
 | **Stream Continuation** | Repeats `pause_turn` requests up to two times on the same thread |
+| **Server Tool Results** | 1.31.0 `tool-result` events (provider-executed) are silently skipped for OpenAI/Anthropic clients |
+| **Upstream Abort** | 1.31.0 `abort` event treated as a normal completion |
 | **Stable Fingerprint** | Latest CLI field shape, derived per API key and stable across restarts |
 | **OpenTelemetry** | `traceparent` (W3C Trace Context) |
 | **Environment** | `x-cli-environment: production` |

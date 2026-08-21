@@ -98,17 +98,33 @@ before(async () => {
           { type: 'text-delta', text: '第一段' },
           { type: 'finish', finishReason: 'pause_turn', totalUsage: { inputTokens: 3, outputTokens: 2 } },
         ]
+        : authKey.includes('user_tool_result')
+        ? [
+          { type: 'start' },
+          { type: 'tool-call', toolCallId: 'call_tool', toolName: 'lookup', input: { city: 'Shanghai' } },
+          // 1.31.0 新增：服务端直接执行的工具结果，代理应静默跳过。
+          { type: 'tool-result', toolCallId: 'call_tool', toolName: 'lookup', output: { type: 'text', value: 'server-done' }, providerExecuted: true },
+          { type: 'finish', finishReason: 'tool-calls', totalUsage: { inputTokens: 12, outputTokens: 5, inputTokenDetails: { cacheReadTokens: 2 } } },
+        ]
+        : authKey.includes('user_abort_event')
+        ? [
+          { type: 'start' },
+          { type: 'text-delta', text: 'partial output' },
+          // 1.31.0：abort 事件表示上游主动终止，代理视为正常结束。
+          { type: 'abort' },
+        ]
         : lastGenerateBody.params.tools?.length > 0
         ? [
           { type: 'start' },
           { type: 'tool-call', toolCallId: 'call_tool', toolName: 'lookup', input: { city: 'Shanghai' } },
-          { type: 'finish', finishReason: 'tool-calls', totalUsage: { inputTokens: 12, outputTokens: 5, cachedInputTokens: 2 } },
+          // 1.31.0 的 usage：缓存字段在 inputTokenDetails.cacheReadTokens。
+          { type: 'finish', finishReason: 'tool-calls', totalUsage: { inputTokens: 12, outputTokens: 5, inputTokenDetails: { cacheReadTokens: 2 } } },
         ]
         : [
           { type: 'start' },
           { type: 'text-start' },
           { type: 'text-delta', text: 'Hello from upstream' },
-          { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 10, outputTokens: 4, cachedInputTokens: 1 } },
+          { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 10, outputTokens: 4, inputTokenDetails: { cacheReadTokens: 1 } } },
         ];
       res.end(`${events.map(event => JSON.stringify(event)).join('\n')}\n`);
       return;
@@ -202,6 +218,11 @@ test('健康检查和认证错误返回正确状态', async () => {
     body: JSON.stringify({ model: 'demo-model', messages: [{ role: 'user', content: 'hi' }] }),
   });
   assert.equal(unauthorized.status, 401);
+  const unauthorizedBody = await unauthorized.json();
+  assert.equal(unauthorizedBody.success, false);
+  assert.equal(unauthorizedBody.error.code, 'UNAUTHORIZED');
+  assert.equal(unauthorizedBody.error.status, 401);
+  assert.match(unauthorizedBody.error.message, /Invalid 'Authorization' header or token/);
 
   const invalid = await fetch(`${proxyUrl}/v1/chat/completions`, {
     method: 'POST',
@@ -215,6 +236,58 @@ test('健康检查和认证错误返回正确状态', async () => {
   assert.match(await invalid.text(), /messages/);
 });
 
+test('全局鉴权：除 models/health 外所有路径未携带 Authorization 头返回 UNAUTHORIZED', async () => {
+  // /v1/messages 未带头 → 401 UNAUTHORIZED
+  const messages = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'demo-model', messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(messages.status, 401);
+  const messagesBody = await messages.json();
+  assert.equal(messagesBody.error.code, 'UNAUTHORIZED');
+
+  // 原生透传未带头 → 401 UNAUTHORIZED
+  const native = await fetch(`${proxyUrl}/alpha/whoami`);
+  assert.equal(native.status, 401);
+
+  // 未知路径未带头 → 401 UNAUTHORIZED（先鉴权后路由）
+  const unknown = await fetch(`${proxyUrl}/nope`);
+  assert.equal(unknown.status, 401);
+  const unknownBody = await unknown.json();
+  assert.equal(unknownBody.error.code, 'UNAUTHORIZED');
+
+  // 带头的未知路径 → 404
+  const unknownAuthed = await fetch(`${proxyUrl}/nope`, {
+    headers: { Authorization: 'Bearer user_integration_validation' },
+  });
+  assert.equal(unknownAuthed.status, 404);
+
+  // OPTIONS 预检不鉴权
+  const options = await fetch(`${proxyUrl}/v1/chat/completions`, { method: 'OPTIONS' });
+  assert.equal(options.status, 204);
+
+  // WebSocket upgrade 未带头 → 401
+  const target = new URL(proxyUrl);
+  const socket = connect(Number(target.port), target.hostname);
+  socket.on('error', () => {});
+  await once(socket, 'connect');
+  let wsReceived = '';
+  socket.on('data', chunk => { wsReceived += chunk.toString('utf8'); });
+  socket.write([
+    'GET /alpha/sandbox/stream/unauthorized HTTP/1.1',
+    `Host: ${target.host}`,
+    'Connection: Upgrade',
+    'Upgrade: websocket',
+    'Sec-WebSocket-Version: 13',
+    'Sec-WebSocket-Key: dGVzdC1ub25jZQ==',
+    '',
+    '',
+  ].join('\r\n'));
+  await once(socket, 'close');
+  assert.match(wsReceived, /^HTTP\/1\.1 401 Unauthorized/);
+});
+
 test('Command Code 原生 HTTP 路径按原始 method、query、body、status 和流透传', async () => {
   const rawBody = '{\n  "message": "保持原始字节"\n}\n';
   const response = await fetch(`${proxyUrl}/alpha/native-test?mode=raw`, {
@@ -222,7 +295,7 @@ test('Command Code 原生 HTTP 路径按原始 method、query、body、status �
     headers: {
       Authorization: 'Bearer user_native_passthrough',
       'Content-Type': 'application/json',
-      'x-command-code-version': '1.15.1',
+      'x-command-code-version': '1.31.0',
       'x-native-request': 'preserved',
     },
     body: rawBody,
@@ -236,13 +309,14 @@ test('Command Code 原生 HTTP 路径按原始 method、query、body、status �
   assert.equal(lastNativeRequest.url, '/alpha/native-test?mode=raw');
   assert.equal(lastNativeRequest.body, rawBody);
   assert.equal(lastNativeRequest.headers.authorization, 'Bearer user_native_passthrough');
-  assert.equal(lastNativeRequest.headers['x-command-code-version'], '1.15.1');
+  assert.equal(lastNativeRequest.headers['x-command-code-version'], '1.31.0');
   assert.equal(lastNativeRequest.headers['x-native-request'], 'preserved');
 });
 
 test('Command Code 原生代理拒绝非官方 API namespace', async () => {
   const response = await fetch(`${proxyUrl}/oauth/token`, {
     method: 'POST',
+    headers: { Authorization: 'Bearer user_native_validation' },
     body: '{}',
   });
   assert.equal(response.status, 404);
@@ -260,6 +334,7 @@ test('Command Code 原生代理在请求体超限后返回 413 并关闭连接',
   socket.write([
     'POST /alpha/native-test HTTP/1.1',
     `Host: ${target.host}`,
+    'Authorization: Bearer user_native_validation',
     `Content-Length: ${10 * 1024 * 1024 + 1}`,
     'Content-Type: application/json',
     '',
@@ -279,6 +354,7 @@ test('Command Code 原生 WebSocket upgrade 建立双向隧道', async () => {
   socket.write([
     'GET /alpha/sandbox/stream/demo-id?token=masked HTTP/1.1',
     `Host: ${target.host}`,
+    'Authorization: Bearer user_ws_tunnel',
     'Connection: Upgrade',
     'Upgrade: websocket',
     'Sec-WebSocket-Version: 13',
@@ -323,6 +399,7 @@ test('Command Code 原生 WebSocket 保留上游正常 EOF', async () => {
   socket.write([
     'GET /alpha/sandbox/stream/upstream-close HTTP/1.1',
     `Host: ${target.host}`,
+    'Authorization: Bearer user_ws_tunnel',
     'Connection: Upgrade',
     'Upgrade: websocket',
     'Sec-WebSocket-Version: 13',
@@ -490,4 +567,48 @@ test('Anthropic 非流式响应正确收集文本和 usage', async () => {
   assert.equal(body.type, 'message');
   assert.equal(body.content[0].text, 'Hello from upstream');
   assert.equal(body.usage.output_tokens, 4);
+});
+
+test('1.31.0 tool-result 事件被静默跳过，不污染下游 tool_calls', async () => {
+  const response = await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer user_tool_result',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'demo-model',
+      messages: [{ role: 'user', content: '调用工具' }],
+      tools: [{ type: 'function', function: { name: 'lookup' } }],
+      stream: true,
+    }),
+  });
+
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(body, /tool_calls/);
+  assert.match(body, /call_tool/);
+  // tool-result 事件不应产生额外的 content 或 server 结果文本。
+  assert.doesNotMatch(body, /server-done/);
+  assert.match(body, /data: \[DONE\]/);
+});
+
+test('1.31.0 abort 事件被视为正常结束并返回流', async () => {
+  const response = await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer user_abort_event',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'demo-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    }),
+  });
+
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(body, /partial output/);
+  assert.match(body, /data: \[DONE\]/);
 });

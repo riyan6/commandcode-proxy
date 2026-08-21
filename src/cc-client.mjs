@@ -181,6 +181,7 @@ export function generateTraceparent() {
 }
 
 // 统一构造最新版 CLI 使用的公共请求头，初始化、生成和模型请求共用同一套规则。
+// 请求头字段对齐 command-code@1.31.0 的 buildCommandAuthHeaders。
 export function buildCommandCodeHeaders({
   apiKey,
   commandCodeVersion,
@@ -193,22 +194,24 @@ export function buildCommandCodeHeaders({
   oauthEnforced = false,
   cmdZdr = false,
   ossPrimaryProvider = '',
+  deepseekInternal = false,
 } = {}) {
   const headers = {
     'Content-Type': 'application/json',
     'User-Agent': userAgent || 'cli',
     'x-cli-environment': cliEnvironment || 'production',
     'x-command-code-version': commandCodeVersion,
-    'x-co-flag': String(Boolean(oauthEnforced)),
     'x-taste-learning': String(Boolean(tasteLearningEnabled)),
+    'x-project-slug': projectSlug,
+    'x-session-id': sessionId,
   };
 
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  if (projectSlug) headers['x-project-slug'] = projectSlug;
-  if (sessionId) headers['x-session-id'] = sessionId;
   if (traceparent) headers.traceparent = traceparent;
   if (ossPrimaryProvider) headers['x-oss-primary-provider'] = ossPrimaryProvider;
   if (cmdZdr) headers['x-cmd-zdr'] = '1';
+  // 1.31.0 新增：DeepSeek 内部 provider 标识，仅内部渠道使用。
+  if (deepseekInternal) headers['x-cmd-provider-deepseek-internal'] = '1';
   return headers;
 }
 
@@ -222,6 +225,7 @@ export async function forwardToCC({
   oauthEnforced,
   cmdZdr,
   ossPrimaryProvider,
+  deepseekInternal,
   body,
   apiKey,
   incomingHeaders = {},
@@ -243,6 +247,7 @@ export async function forwardToCC({
       oauthEnforced,
       cmdZdr,
       ossPrimaryProvider,
+      deepseekInternal,
     }),
     body: JSON.stringify(body),
     signal,

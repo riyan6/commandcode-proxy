@@ -27,8 +27,10 @@ export function loadConfig() {
     host: '0.0.0.0',
     apiKey: '',
     apiBase: 'https://api.commandcode.ai',
-    // 协议实现基线与发送给上游的 CLI 版本头分开管理。
-    protocolVersion: '1.15.1',
+    // 协议实现基线 = 发送给上游的 x-command-code-version 头，两者保持一致，
+    // 不再跟随 npm latest，避免“头版本新但特性旧”被后端识别。
+    // 基线跟随本机 command-code@1.31.0 bundle 的 wire 协议实现。
+    protocolVersion: '1.31.0',
     cliEnvironment: 'production',
     userAgent: 'cli',
     projectSlug: 'cc-proxy',
@@ -91,10 +93,10 @@ export function loadConfig() {
   }
 
   defaults.port = readPositiveInteger(defaults.port, 3050);
-  // 只允许 Command Code 1.15.1 已知的请求模式，普通对话默认使用 agent。
+  // 只允许 Command Code 1.31.0 已知的请求模式，普通对话默认使用 agent。
   if (!VALID_CC_MODES.has(defaults.mode)) defaults.mode = 'agent';
   if (typeof defaults.protocolVersion !== 'string' || !defaults.protocolVersion.trim()) {
-    defaults.protocolVersion = '1.15.1';
+    defaults.protocolVersion = '1.31.0';
   }
   defaults.modelRefreshIntervalMs = readPositiveInteger(
     defaults.modelRefreshIntervalMs,

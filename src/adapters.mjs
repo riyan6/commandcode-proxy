@@ -36,7 +36,7 @@ function textFromContent(content) {
 function toolOutputFromContent(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return content == null ? '' : String(content);
-  // 1.15.1 CLI 会保留工具结果中各文本块的边界，用换行拼接后再发送给上游。
+  // 1.31.0 CLI 会保留工具结果中各文本块的边界，用换行拼接后再发送给上游。
   return content
     .filter(part => part?.type === 'text')
     .map(part => part.text || '')
@@ -68,6 +68,9 @@ function contentPartToWire(part) {
 
 function buildWireMessages(messages) {
   const wireMessages = [];
+  // 1.31.0 的 toWireMessages 会记录 toolCallId → toolName 映射，
+  // 后续 tool-result 用该映射回填工具名，找不到时用 "unknown"。
+  const toolNameById = new Map();
 
   for (const message of messages) {
     // system/developer 会被提升到 params.system，不能直接进入上游 messages。
@@ -85,10 +88,12 @@ function buildWireMessages(messages) {
       }
 
       for (const toolCall of message.tool_calls || []) {
+        const toolName = toolCall.function?.name || '';
+        toolNameById.set(toolCall.id, toolName);
         content.push({
           type: 'tool-call',
           toolCallId: toolCall.id,
-          toolName: toolCall.function?.name || '',
+          toolName,
           input: typeof toolCall.function?.arguments === 'string'
             ? tryParseJSON(toolCall.function.arguments)
             : (toolCall.function?.arguments || {}),
@@ -110,8 +115,8 @@ function buildWireMessages(messages) {
             toolResults.push({
               type: 'tool-result',
               toolCallId: part.tool_use_id || part.toolCallId,
-              // 最新 CLI 的 toWireMessages 不回填工具名。
-              toolName: '',
+              // 1.31.0 的 toWireMessages 会回填工具名，找不到时用 "unknown"。
+              toolName: toolNameById.get(part.tool_use_id || part.toolCallId) ?? 'unknown',
               output: {
                 type: 'text',
                 value: toolOutputFromContent(part.content ?? part.output),
@@ -128,15 +133,15 @@ function buildWireMessages(messages) {
       continue;
     }
 
-    // 旧版 OpenAI 客户端可能使用 function 角色，统一转换为 1.15.1 的 tool。
+    // 旧版 OpenAI 客户端可能使用 function 角色，统一转换为 1.31.0 的 tool。
     if (message.role === 'tool' || message.role === 'function') {
       wireMessages.push({
         role: 'tool',
         content: [{
           type: 'tool-result',
           toolCallId: message.tool_call_id,
-          // 最新 CLI 的工具结果线协议不依赖工具名。
-          toolName: '',
+          // 1.31.0 的 toWireMessages 会回填工具名，找不到时用 "unknown"。
+          toolName: toolNameById.get(message.tool_call_id) ?? 'unknown',
           output: {
             type: 'text',
             value: typeof message.content === 'string'
@@ -254,12 +259,29 @@ export function buildCcRequest(openaiReq, {
 }
 
 // 统一处理上游 usage，避免 outputTokens 为 0 时错误计费。
+// 1.31.0 的 finish 事件把缓存字段放在 inputTokenDetails.cacheReadTokens / cacheWriteTokens，
+// 这里统一归一化到 cachedInputTokens / inputTokenDetails 供下游使用。
 export function normalizeUsage(usage) {
   if (!usage) return;
   if (!Number(usage.outputTokens)) {
     usage.inputTokens = 0;
     usage.cachedInputTokens = 0;
   }
+  // 1.31.0 新字段：inputTokenDetails.cacheReadTokens / cacheWriteTokens
+  const details = usage.inputTokenDetails;
+  if (details && details.cacheReadTokens !== undefined) {
+    usage.cachedInputTokens = details.cacheReadTokens;
+  }
+}
+
+// 从 1.31.0 的 usage 对象读取缓存输入 token。
+// finish 事件的 totalUsage.inputTokenDetails.cacheReadTokens 是权威字段，
+// 老版本用顶层的 cachedInputTokens，这里都兼容。
+export function getCacheReadTokens(usage) {
+  if (!usage) return 0;
+  const details = usage.inputTokenDetails;
+  if (details && details.cacheReadTokens !== undefined) return details.cacheReadTokens;
+  return usage.cachedInputTokens ?? 0;
 }
 
 export function mapFinishReason(reason) {
@@ -562,7 +584,9 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
 
             const id = event.toolCallId || `toolu_${randomUUID().slice(0, 12)}`;
             const name = event.toolName || '';
-            const input = typeof event.input === 'string' ? event.input : JSON.stringify(event.input || {});
+            // 1.31.0 的 tool-call 事件同时支持 input 或 args 字段。
+            const rawInput = event.input ?? event.args;
+            const input = typeof rawInput === 'string' ? rawInput : JSON.stringify(rawInput || {});
             const toolIndex = nextBlockIndex++;
             yield `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: toolIndex, content_block: { type: 'tool_use', id, name, input: {} } })}\n\n`;
             yield `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: toolIndex, delta: { type: 'input_json_delta', partial_json: input } })}\n\n`;
@@ -571,6 +595,17 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
             break;
           }
 
+          // 1.31.0 新增：服务端直接执行的工具结果。Anthropic 协议没有对应概念，静默跳过。
+          case 'tool-result':
+            break;
+
+          // 1.31.0：abort 事件表示上游主动终止，视为正常结束。
+          case 'abort': {
+            ctx.finished = true;
+            // abort 是合法终止，不算零输出；有文本时避免触发零输出防护。
+            if (outputTokens === 0 && nextBlockIndex > 0) outputTokens = 1;
+            break;
+          }
           case 'finish-step':
             // step 结束不代表整条响应结束，最终状态以 finish 为准。
             break;
@@ -592,7 +627,8 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
               normalizeUsage(usage);
               inputTokens = usage.inputTokens ?? inputTokens;
               outputTokens = usage.outputTokens ?? outputTokens;
-              cachedInputTokens = usage.cachedInputTokens ?? cachedInputTokens;
+              // 1.31.0 的缓存字段在 inputTokenDetails.cacheReadTokens / cacheWriteTokens。
+              cachedInputTokens = getCacheReadTokens(usage) ?? cachedInputTokens;
               cacheWriteTokens = usage.inputTokenDetails?.cacheWriteTokens ?? cacheWriteTokens;
             } else {
               inputTokens = 0;
