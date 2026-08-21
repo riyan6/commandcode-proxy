@@ -422,6 +422,19 @@ export function convertAnthropicToOpenAI(anthropicReq) {
         });
       }
       if (textContent) openaiMessages.push({ role: 'user', content: textContent });
+    } else if (message.role === 'tool') {
+      // 兼容部分客户端直接发送独立 tool 消息（非标准 Anthropic 但存在）。
+      const toolContent = typeof message.content === 'string'
+        ? message.content
+        : Array.isArray(message.content)
+          ? message.content.filter(part => part?.type === 'text').map(part => part.text || '').join('')
+          : String(message.content || '');
+      openaiMessages.push({
+        role: 'tool',
+        tool_call_id: message.tool_use_id || message.tool_call_id,
+        name: message.name || toolNameFromId[message.tool_use_id || message.tool_call_id] || '',
+        content: toolContent,
+      });
     }
   }
 

@@ -99,7 +99,7 @@ export function validateOpenAIRequest(request) {
 export function validateAnthropicRequest(request) {
   let problem = validateCommonRequest(request);
   if (problem) return problem;
-  problem = validateMessages(request.messages, ['user', 'assistant']);
+  problem = validateMessages(request.messages, ['user', 'assistant', 'tool']);
   if (problem) return problem;
   problem = validatePositiveInteger(request.max_tokens, 'max_tokens');
   if (problem) return problem;

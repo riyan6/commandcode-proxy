@@ -1006,6 +1006,19 @@ async function handleMessages(req, res) {
 
   const validationError = validateAnthropicRequest(anthropicReq);
   if (validationError) {
+    // 打印原始请求的消息结构（只含 role 与 content 类型，不含文本/Key），
+    // 用于排查 Claude Code 发送了合法白名单之外的 role。
+    log('warn', 'Anthropic validation failed', {
+      field: validationError.field,
+      roles: (anthropicReq.messages || []).map(message => message.role),
+      contentTypes: (anthropicReq.messages || []).map(message =>
+        Array.isArray(message.content)
+          ? message.content.map(part => part?.type)
+          : typeof message.content),
+      model: anthropicReq.model,
+      hasThinking: Boolean(anthropicReq.thinking),
+      systemType: Array.isArray(anthropicReq.system) ? 'array' : typeof anthropicReq.system,
+    });
     sendAnthropicError(res, 400, 'invalid_request_error', validationError.message);
     return;
   }
