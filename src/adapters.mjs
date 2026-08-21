@@ -457,7 +457,11 @@ export function convertAnthropicToOpenAI(anthropicReq) {
       openaiReq.reasoning_effort = thinking.effort ?? 'medium';
     } else if (thinking.type !== 'disabled' && thinking.type !== 'none'
       && thinking.budget_tokens !== undefined) {
-      if (thinking.budget_tokens >= 10000) openaiReq.reasoning_effort = 'high';
+      // 按 CC 1.31.0 白名单（low/medium/high/xhigh/max）分 5 档映射，
+      // 让 Claude Code 的大 thinking 预算能真正传到 max，而不是封顶在 high。
+      if (thinking.budget_tokens >= 100000) openaiReq.reasoning_effort = 'max';
+      else if (thinking.budget_tokens >= 30000) openaiReq.reasoning_effort = 'xhigh';
+      else if (thinking.budget_tokens >= 10000) openaiReq.reasoning_effort = 'high';
       else if (thinking.budget_tokens >= 5000) openaiReq.reasoning_effort = 'medium';
       else openaiReq.reasoning_effort = 'low';
     }

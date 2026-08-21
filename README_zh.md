@@ -115,7 +115,7 @@ OpenAI Chat Completions 兼容。支持流式和非流式、工具调用、多�
 | `max_tokens` | 否 | 最大生成 token（默认 64000） |
 | `stream` | 否 | 是否 SSE 流式（默认 false） |
 | `temperature` | 否 | 采样温度（0-2）|
-| `reasoning_effort` | 否 | 推理强度 `low`/`medium`/`high`/`max` |
+| `reasoning_effort` | 否 | 推理强度 `low`/`medium`/`high`/`xhigh`/`max`（是否支持取决于模型） |
 | `tools` | 否 | 工具定义（OpenAI function calling 格式）|
 | `tool_choice` | 否 | 工具选择策略 |
 | `parallel_tool_calls` | 否 | 是否允许并行工具调用 |
@@ -218,7 +218,7 @@ Anthropic Messages API 兼容端点。支持流式和非流式、工具调用。
 | 工具结果 | `user` 消息中的 `tool_result` 块 | 自动转为 `role: "tool"` |
 | 工具定义 | `input_schema` | 自动映射为 `parameters` |
 | `tool_choice` | `{type:"auto"/"any"/"tool"}` | `any`→`required`，`tool`→function 对象 |
-| 推理强度 | `thinking.budget_tokens` | 自动映射为 `reasoning_effort`（≥10000→high, ≥5000→medium, ≥2000→low） |
+| 推理强度 | `thinking.budget_tokens` | 自动映射为 `reasoning_effort`（≥100000→max, ≥30000→xhigh, ≥10000→high, ≥5000→medium, 否则 low）；`adaptive` 模式直接透传 `effort` |
 | 停止原因 | `end_turn`/`max_tokens`/`tool_use` | 自动映射为 `stop`/`length`/`tool_calls` |
 | Token 用量 | `input_tokens`/`output_tokens` + 缓存 | 透传，缓存字段映射为 Anthropic 格式 |
 
@@ -409,7 +409,7 @@ claude
 | **OpenTelemetry** | `traceparent` (W3C Trace Context) |
 | **环境标识** | `x-cli-environment: production` |
 | **Project Slug** | 自定义 `x-project-slug` |
-| **思考强度** | `reasoning_effort` 透传 (low/medium/high/max) |
+| **思考强度** | `reasoning_effort` 透传 (low/medium/high/xhigh/max，是否支持取决于模型) |
 | **API Key 格式验证** | 正则 `user_[a-zA-Z0-9_-]+`，自动清理多余路径/前缀，`sk-xxx` 等非 `user_` 格式拒 |
 | **流式超时保护** | 流式 30s、非流式 90s → 429 + SDK 自动重试 |
 | **连续超时阈值** | 连续 3 次超时后才提示压缩上下文 |

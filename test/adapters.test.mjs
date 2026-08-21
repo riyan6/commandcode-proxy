@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCcRequest, normalizeUsage, getCacheReadTokens } from '../src/adapters.mjs';
+import { buildCcRequest, normalizeUsage, getCacheReadTokens, convertAnthropicToOpenAI } from '../src/adapters.mjs';
 
 test('请求体与 command-code 1.31.0 的 CLI 信封和工具格式一致', () => {
   const body = buildCcRequest({
@@ -117,4 +117,53 @@ test('1.31.0 usage 的缓存字段在 inputTokenDetails.cacheReadTokens', () => 
 
   // 兼容老版本顶层 cachedInputTokens。
   assert.equal(getCacheReadTokens({ inputTokens: 1, outputTokens: 1, cachedInputTokens: 3 }), 3);
+});
+
+test('Claude Code thinking.budget_tokens 按 5 档映射到 reasoning_effort', () => {
+  const cases = [
+    [150000, 'max'],
+    [100000, 'max'],
+    [50000, 'xhigh'],
+    [30000, 'xhigh'],
+    [20000, 'high'],
+    [10000, 'high'],
+    [8000, 'medium'],
+    [5000, 'medium'],
+    [3000, 'low'],
+  ];
+  for (const [budget, expected] of cases) {
+    const openai = convertAnthropicToOpenAI({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: 'hi' }],
+      thinking: { type: 'enabled', budget_tokens: budget },
+    });
+    assert.equal(openai.reasoning_effort, expected, `budget=${budget}`);
+  }
+});
+
+test('Claude Code adaptive thinking 直接透传 effort', () => {
+  const openai = convertAnthropicToOpenAI({
+    model: 'claude-sonnet-5',
+    max_tokens: 1000,
+    messages: [{ role: 'user', content: 'hi' }],
+    thinking: { type: 'adaptive', effort: 'max' },
+  });
+  assert.equal(openai.reasoning_effort, 'max');
+});
+
+test('OpenAI 路径的 reasoning_effort 原样透传到 CC 请求体', () => {
+  const body = buildCcRequest({
+    model: 'deepseek/deepseek-v4-flash',
+    messages: [{ role: 'user', content: 'hi' }],
+    reasoning_effort: 'high',
+  });
+  assert.equal(body.params.reasoning_effort, 'high');
+
+  const maxBody = buildCcRequest({
+    model: 'deepseek/deepseek-v4-flash',
+    messages: [{ role: 'user', content: 'hi' }],
+    reasoning_effort: 'max',
+  });
+  assert.equal(maxBody.params.reasoning_effort, 'max');
 });

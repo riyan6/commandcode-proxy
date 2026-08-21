@@ -115,7 +115,7 @@ OpenAI Chat Completions compatible. Supports streaming, non-streaming, tool call
 | `max_tokens` | No | Max tokens to generate (default 64000) |
 | `stream` | No | SSE streaming (default false) |
 | `temperature` | No | Sampling temperature (0-2) |
-| `reasoning_effort` | No | Reasoning intensity: `low`/`medium`/`high`/`max` |
+| `reasoning_effort` | No | Reasoning intensity: `low`/`medium`/`high`/`xhigh`/`max` (model-dependent) |
 | `tools` | No | Tool definitions (OpenAI function calling format) |
 | `tool_choice` | No | Tool selection strategy |
 | `parallel_tool_calls` | No | Allow parallel tool calls |
@@ -218,7 +218,7 @@ Anthropic Messages API compatible endpoint. Supports streaming, non-streaming, a
 | Tool results | `tool_result` blocks in `user` messages | Auto-converted to `role: "tool"` |
 | Tool definitions | `input_schema` | Auto-mapped to `parameters` |
 | `tool_choice` | `{type:"auto"/"any"/"tool"}` | `any`→`required`, `tool`→function object |
-| Reasoning | `thinking.budget_tokens` | Auto-mapped to `reasoning_effort` (≥10000→high, ≥5000→medium, ≥2000→low) |
+| Reasoning | `thinking.budget_tokens` | Auto-mapped to `reasoning_effort` (≥100000→max, ≥30000→xhigh, ≥10000→high, ≥5000→medium, else low); `adaptive` mode passes `effort` through |
 | Stop reason | `end_turn`/`max_tokens`/`tool_use` | Auto-mapped to `stop`/`length`/`tool_calls` |
 | Token usage | `input_tokens`/`output_tokens` + cache | Passed through, cache fields mapped to Anthropic format |
 
@@ -409,7 +409,7 @@ Based on analysis of the local `command-code@1.31.0` bundle:
 | **OpenTelemetry** | `traceparent` (W3C Trace Context) |
 | **Environment** | `x-cli-environment: production` |
 | **Project Slug** | Custom `x-project-slug` |
-| **Reasoning Effort** | `reasoning_effort` pass-through (low/medium/high/max) |
+| **Reasoning Effort** | `reasoning_effort` pass-through (low/medium/high/xhigh/max, model-dependent) |
 | **Key Validation** | Regex `user_[a-zA-Z0-9_-]+`, auto-cleans extra paths/prefixes, rejects `sk-xxx` format |
 | **Stream Timeout** | 30s streaming / 90s non-streaming → 429 with SDK auto-retry |
 | **Consecutive Timeout** | 3 consecutive timeouts before "reduce context" hint |
