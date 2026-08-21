@@ -92,7 +92,18 @@ before(async () => {
       const authKey = req.headers.authorization || '';
       const callCount = (generateCallCounts.get(authKey) || 0) + 1;
       generateCallCounts.set(authKey, callCount);
-      const events = authKey.includes('user_pause_continuation') && callCount === 1
+      const events = authKey.includes('user_anthropic_thinking')
+        ? [
+          { type: 'start' },
+          { type: 'reasoning-start' },
+          { type: 'reasoning-delta', text: '让我想想' },
+          { type: 'reasoning-delta', text: '再想想' },
+          { type: 'reasoning-end' },
+          { type: 'text-start' },
+          { type: 'text-delta', text: 'Hello with thinking' },
+          { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 10, outputTokens: 4, inputTokenDetails: { cacheReadTokens: 1 } } },
+        ]
+        : authKey.includes('user_pause_continuation') && callCount === 1
         ? [
           { type: 'start' },
           { type: 'text-delta', text: '第一段' },
@@ -611,4 +622,118 @@ test('1.31.0 abort 事件被视为正常结束并返回流', async () => {
   assert.equal(response.status, 200);
   assert.match(body, /partial output/);
   assert.match(body, /data: \[DONE\]/);
+});
+
+test('Claude Code 用 x-api-key 认证可访问 /v1/messages', async () => {
+  // Claude Code 官方 SDK 使用 x-api-key 头而不是 Authorization。
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': 'user_claude_code_key',
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 128,
+      system: [{ type: 'text', text: 'You are helpful.' }],
+      messages: [{ role: 'user', content: 'hello' }],
+      stream: true,
+    }),
+  });
+
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(body, /event: message_start/);
+  assert.match(body, /text_delta/);
+  assert.match(body, /Hello from upstream/);
+  assert.match(body, /event: message_delta/);
+  assert.match(body, /event: message_stop/);
+  // 转发到上游的请求应该带上 API Key（Authorization 头）。
+  assert.equal(lastGenerateHeaders.authorization, 'Bearer user_claude_code_key');
+});
+
+test('Claude Code 未带头访问 /v1/messages 返回 UNAUTHORIZED', async () => {
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 128,
+      messages: [{ role: 'user', content: 'hello' }],
+    }),
+  });
+
+  assert.equal(response.status, 401);
+  const body = await response.json();
+  assert.equal(body.success, false);
+  assert.equal(body.error.code, 'UNAUTHORIZED');
+});
+
+test('Anthropic 流式把 CC reasoning 映射为 thinking_delta 事件', async () => {
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': 'user_anthropic_thinking',
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 128,
+      thinking: { type: 'enabled', budget_tokens: 5000 },
+      messages: [{ role: 'user', content: 'hello' }],
+      stream: true,
+    }),
+  });
+
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  // CC 的 reasoning-delta 应映射为 Anthropic 的 thinking block 事件。
+  assert.match(body, /content_block_start/);
+  assert.match(body, /"type":"thinking"/);
+  assert.match(body, /thinking_delta/);
+  assert.match(body, /让我想想/);
+  assert.match(body, /再想想/);
+  assert.match(body, /Hello with thinking/);
+  assert.match(body, /event: message_stop/);
+});
+
+test('Claude Code 流式工具调用输出 tool_use 事件序列', async () => {
+  // 复用 user_tool_result mock 分支：返回 tool-call + tool-result + finish(tool-calls)。
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': 'user_tool_result',
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 256,
+      tools: [{
+        name: 'lookup',
+        description: '查询天气',
+        input_schema: { type: 'object', properties: { city: { type: 'string' } } },
+      }],
+      messages: [{ role: 'user', content: '上海天气？' }],
+      stream: true,
+    }),
+  });
+
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  // Anthropic 工具调用事件序列：content_block_start(tool_use) → input_json_delta → content_block_stop。
+  assert.match(body, /"type":"tool_use"/);
+  assert.match(body, /input_json_delta/);
+  assert.match(body, /"name":"lookup"/);
+  assert.match(body, /"id":"call_tool"/);
+  assert.match(body, /event: message_delta/);
+  assert.match(body, /"stop_reason":"tool_use"/);
+  assert.match(body, /event: message_stop/);
+  // tool-result 事件不应泄露给客户端。
+  assert.doesNotMatch(body, /server-done/);
 });

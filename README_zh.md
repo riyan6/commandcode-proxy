@@ -370,6 +370,19 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
+### Claude Code
+
+通过环境变量指向本代理，认证使用 `x-api-key` 头（Anthropic SDK 标准，代理已兼容）：
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:3050"
+export ANTHROPIC_API_KEY="user_xxxxxxxxx"
+export ANTHROPIC_MODEL="claude-sonnet-4-6"   # 可选，指定模型
+claude
+```
+
+> 说明：Claude Code 官方 SDK 用 `x-api-key` 头发送 API Key（而非 `Authorization`），代理的全局鉴权已同时支持两种头。`anthropic-version` 头会被忽略不校验。CC 返回的推理内容（reasoning）会映射为 Anthropic 的 `thinking_delta` SSE 事件，兼容 Claude Code 的 thinking 参数。
+
 ### OpenCode
 ```json
 {

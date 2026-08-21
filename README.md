@@ -370,6 +370,19 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
+### Claude Code
+
+Point Claude Code at this proxy via environment variables. Auth uses the `x-api-key` header (Anthropic SDK standard — supported by the proxy):
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:3050"
+export ANTHROPIC_API_KEY="user_xxxxxxxxx"
+export ANTHROPIC_MODEL="claude-sonnet-4-6"   # optional model override
+claude
+```
+
+> Note: Claude Code's official SDK sends the API key in the `x-api-key` header (not `Authorization`); the proxy's global auth accepts both. The `anthropic-version` header is ignored. CC reasoning output is mapped to Anthropic `thinking_delta` SSE events for compatibility with Claude Code's thinking parameter.
+
 ### OpenCode
 ```json
 {

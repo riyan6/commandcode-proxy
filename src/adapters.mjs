@@ -491,11 +491,32 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
 
   function startTextBlock() {
     if (!blockStarted || currentBlockType !== 'text') {
-      const close = closeTextBlock();
+      const close = closeTextBlock() + closeThinkingBlock();
       currentBlockIndex = nextBlockIndex++;
       currentBlockType = 'text';
       blockStarted = true;
       return close + `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: currentBlockIndex, content_block: { type: 'text', text: '' } })}\n\n`;
+    }
+    return '';
+  }
+
+  // thinking block 管理：Claude Code 期望 thinking 是独立的 content block（signature 可选）。
+  function closeThinkingBlock() {
+    if (blockStarted && currentBlockType === 'thinking') {
+      blockStarted = false;
+      currentBlockType = null;
+      return `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: currentBlockIndex })}\n\n`;
+    }
+    return '';
+  }
+
+  function startThinkingBlock() {
+    if (!blockStarted || currentBlockType !== 'thinking') {
+      const close = closeTextBlock() + closeThinkingBlock();
+      currentBlockIndex = nextBlockIndex++;
+      currentBlockType = 'thinking';
+      blockStarted = true;
+      return close + `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: currentBlockIndex, content_block: { type: 'thinking', thinking: '' } })}\n\n`;
     }
     return '';
   }
@@ -509,7 +530,12 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
         role: 'assistant',
         content: [],
         model,
-        usage: { input_tokens: 0, output_tokens: 0 },
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
       },
     })}\n\n`;
   }
@@ -557,9 +583,6 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
           case 'start':
           case 'start-step':
           case 'text-start':
-          case 'reasoning-start':
-          case 'reasoning-delta':
-          case 'reasoning-end':
           case 'provider-metadata':
           case 'tool-input-start':
           case 'tool-input-delta':
@@ -568,6 +591,29 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
           case 'text-end':
             // 这些是内部信号，不直接暴露给 Anthropic 客户端。
             break;
+
+          // CC 的推理事件映射为 Anthropic 的 thinking block，
+          // 兼容 Claude Code 使用 thinking 参数时对 thinking_delta 事件的期待。
+          case 'reasoning-start': {
+            const closeBlock = closeTextBlock();
+            const startBlock = startThinkingBlock();
+            yield closeBlock + startBlock;
+            break;
+          }
+
+          case 'reasoning-delta': {
+            const text = event.text || '';
+            if (!text) break;
+            const startBlock = startThinkingBlock();
+            yield startBlock + `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: currentBlockIndex, delta: { type: 'thinking_delta', thinking: text } })}\n\n`;
+            break;
+          }
+
+          case 'reasoning-end': {
+            const closeThinking = closeThinkingBlock();
+            if (closeThinking) yield closeThinking;
+            break;
+          }
 
           case 'text-delta': {
             const text = event.text || '';
@@ -579,7 +625,8 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
 
           case 'tool-call': {
             if (event.providerExecuted) break;
-            const closeBlock = closeTextBlock();
+            // 关闭当前文本或 thinking block，再开始工具 block。
+            const closeBlock = closeTextBlock() + closeThinkingBlock();
             if (closeBlock) yield closeBlock;
 
             const id = event.toolCallId || `toolu_${randomUUID().slice(0, 12)}`;
@@ -659,7 +706,7 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
 
     if (!hasError && !ctx.shouldContinue) {
       if (!ctx.finished) throw new Error('UPSTREAM_STREAM_INCOMPLETE');
-      const closeBlock = closeTextBlock();
+      const closeBlock = closeTextBlock() + closeThinkingBlock();
       if (closeBlock) yield closeBlock;
 
       if (outputTokens === 0) {

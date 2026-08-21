@@ -490,10 +490,12 @@ async function handleNativeCommandCode(req, res, url) {
 }
 
 function getApiKey(headers) {
-  const auth = headers['authorization'] || headers['Authorization'] || '';
-  if (!auth.startsWith('Bearer ')) return null;
+  // 兼容两种认证方式：
+  // 1. OpenAI 风格：Authorization: Bearer user_xxx
+  // 2. Anthropic 风格（Claude Code / Anthropic SDK 标准）：x-api-key: user_xxx
+  const auth = headers['authorization'] || headers['Authorization'] || headers['x-api-key'] || '';
   // 从字符串中提取第一个 user_ 开头的 Key，自动清理空格/引号/多余路径
-  const match = auth.slice(7).match(/user_[a-zA-Z0-9_-]+/);
+  const match = auth.match(/user_[a-zA-Z0-9_-]+/);
   if (!match) return null;
   return match[0];
 }
