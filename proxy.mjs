@@ -563,6 +563,14 @@ async function handleChatCompletions(req, res) {
     permissionMode: CFG.permissionMode,
   });
 
+  // debug 级别打印发送给 CC 的 messages 结构（只含 role 与 content 类型，不含文本内容）。
+  log('debug', 'CC messages structure (OpenAI)', {
+    roles: ccBody.params.messages.map(message => message.role),
+    contentTypes: ccBody.params.messages.map(message =>
+      (message.content || []).map(part => part.type)),
+    paramsKeys: Object.keys(ccBody.params),
+  });
+
   // AbortController 用于客户端断连时真正打断 CC 上游（pi-commandcode-provider 模式）
   const abortController = new AbortController();
   let aborted = false;
@@ -1011,6 +1019,15 @@ async function handleMessages(req, res) {
     threadId: getThreadId(req.headers, anthropicReq),
     mode: CFG.mode,
     permissionMode: CFG.permissionMode,
+  });
+
+  // debug 级别打印发送给 CC 的 messages 结构（只含 role 与 content 类型，不含文本内容），
+  // 用于排查 CC 后端校验错误（如 "messages[1].role is invalid"）。
+  log('debug', 'CC messages structure (Anthropic)', {
+    roles: ccBody.params.messages.map(message => message.role),
+    contentTypes: ccBody.params.messages.map(message =>
+      (message.content || []).map(part => part.type)),
+    paramsKeys: Object.keys(ccBody.params),
   });
 
   const abortController = new AbortController();

@@ -100,6 +100,9 @@ function buildWireMessages(messages) {
         });
       }
 
+      // 跳过 content 为空的 assistant 消息：CC 后端不接受空消息，
+      // 会报 "messages[N].role is invalid"（角色与内容不匹配的笼统错误）。
+      if (content.length === 0) continue;
       wireMessages.push({ role: 'assistant', content });
       continue;
     }
@@ -107,7 +110,7 @@ function buildWireMessages(messages) {
     if (message.role === 'user') {
       const content = [];
       const toolResults = [];
-      if (typeof message.content === 'string') {
+      if (typeof message.content === 'string' && message.content) {
         content.push({ type: 'text', text: message.content });
       } else if (Array.isArray(message.content)) {
         for (const part of message.content) {
@@ -128,7 +131,9 @@ function buildWireMessages(messages) {
           }
         }
       }
+      // 1.31.0 的 toWireMessages：tool 结果先 push，文本后 push。
       if (toolResults.length > 0) wireMessages.push({ role: 'tool', content: toolResults });
+      // 跳过 content 为空的 user 消息，避免 CC 后端拒绝空消息。
       if (content.length > 0) wireMessages.push({ role: 'user', content });
       continue;
     }
@@ -402,7 +407,7 @@ export function convertAnthropicToOpenAI(anthropicReq) {
           else if (block.type === 'tool_result') toolResults.push(block);
         }
       }
-      if (textContent) openaiMessages.push({ role: 'user', content: textContent });
+      // 1.31.0 的 toWireMessages：同一 user 消息内的 tool_result 转成 tool 消息放在文本前面。
       for (const result of toolResults) {
         const toolContent = typeof result.content === 'string'
           ? result.content
@@ -416,6 +421,7 @@ export function convertAnthropicToOpenAI(anthropicReq) {
           content: toolContent,
         });
       }
+      if (textContent) openaiMessages.push({ role: 'user', content: textContent });
     }
   }
 

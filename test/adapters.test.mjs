@@ -167,3 +167,20 @@ test('OpenAI 路径的 reasoning_effort 原样透传到 CC 请求体', () => {
   });
   assert.equal(maxBody.params.reasoning_effort, 'max');
 });
+
+test('空的 assistant/user 消息被跳过，避免 CC 后端拒绝', () => {
+  const body = buildCcRequest({
+    model: 'demo-model',
+    messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: null },          // 空 assistant
+      { role: 'user', content: '' },                  // 空 user
+      { role: 'assistant', content: [] },             // 空 assistant 数组
+      { role: 'user', content: '继续' },
+    ],
+  });
+
+  const roles = body.params.messages.map(message => message.role);
+  assert.deepEqual(roles, ['user', 'user']);
+  assert.ok(body.params.messages.every(message => message.content.length > 0));
+});
