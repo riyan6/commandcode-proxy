@@ -184,3 +184,23 @@ test('空的 assistant/user 消息被跳过，避免 CC 后端拒绝', () => {
   assert.deepEqual(roles, ['user', 'user']);
   assert.ok(body.params.messages.every(message => message.content.length > 0));
 });
+
+test('Claude Code 发送 role:system 消息时合并到 params.system', () => {
+  const openai = convertAnthropicToOpenAI({
+    model: 'deepseek/deepseek-v4-flash',
+    max_tokens: 1000,
+    system: [{ type: 'text', text: '顶层系统提示' }],
+    messages: [
+      { role: 'user', content: '你好' },
+      { role: 'system', content: '消息里的系统提示' },
+    ],
+  });
+
+  // system 消息被保留，buildCcRequest 会合并到 params.system。
+  assert.deepEqual(openai.messages.map(m => m.role), ['system', 'user', 'system']);
+
+  const cc = buildCcRequest(openai, { mode: 'agent', permissionMode: 'standard' });
+  assert.equal(cc.params.system, '顶层系统提示\n消息里的系统提示');
+  // 系统提示不进 wire messages。
+  assert.deepEqual(cc.params.messages.map(m => m.role), ['user']);
+});

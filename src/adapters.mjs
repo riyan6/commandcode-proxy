@@ -364,6 +364,17 @@ export function convertAnthropicToOpenAI(anthropicReq) {
 
   const messages = anthropicReq.messages || [];
   for (const message of messages) {
+    // Claude Code 会把系统提示词作为 role:'system' 消息发送。
+    // 保持为 system 角色，buildCcRequest 会自动提升到 params.system。
+    if (message.role === 'system') {
+      const systemText = typeof message.content === 'string'
+        ? message.content
+        : Array.isArray(message.content)
+          ? message.content.filter(part => part?.type === 'text').map(part => part.text || '').join('\n')
+          : String(message.content || '');
+      if (systemText) openaiMessages.push({ role: 'system', content: systemText });
+      continue;
+    }
     if (message.role === 'assistant') {
       let textContent = '';
       const thinkingContent = [];
