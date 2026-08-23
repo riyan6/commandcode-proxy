@@ -4,7 +4,8 @@
  */
 import http from 'http';
 import { randomUUID } from 'crypto';
-import { createWriteStream } from 'fs';
+import { createWriteStream, mkdirSync } from 'fs';
+import { dirname as pathDirname } from 'path';
 import { pipeline } from 'stream/promises';
 import { loadConfig } from './src/config.mjs';
 import { createStateStore } from './src/state.mjs';
@@ -524,8 +525,14 @@ function recordNativeWire(event, req, url, body, upstream) {
   if (!CFG.recordWire) return;
   try {
     if (!recordStream) {
+      // 父目录不存在时先创建：createWriteStream 遇到缺失目录会静默失败，导致漏记。
+      const recordDir = pathDirname(CFG.recordWire);
+      if (recordDir && recordDir !== '.') mkdirSync(recordDir, { recursive: true });
       recordStream = createWriteStream(CFG.recordWire, { flags: 'a' });
-      recordStream.on('error', () => { recordStream = null; });
+      recordStream.on('error', () => {
+        log('warn', 'RECORD_WIRE 文件写入失败，抓包记录已停止', { file: CFG.recordWire });
+        recordStream = null;
+      });
     }
     if (event === 'request') {
       const bodyText = body ? body.toString('utf8') : '';

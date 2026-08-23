@@ -4,12 +4,13 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
-import { readFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const wireRecordPath = resolve(projectRoot, 'test', '.wire-record-test.jsonl');
+// 故意使用不存在的嵌套目录：验证代理会自动创建父目录再写抓包文件。
+const wireRecordPath = resolve(projectRoot, 'test', '.wire-record-dir', 'inner', 'record.jsonl');
 let upstream;
 let proxyProcess;
 let proxyUrl;
@@ -57,7 +58,7 @@ async function waitForHealth(url) {
 }
 
 before(async () => {
-  try { unlinkSync(wireRecordPath); } catch {}
+  rmSync(wireRecordPath, { recursive: true, force: true });
   upstream = createServer(async (req, res) => {
     const bodyText = await readRequestBody(req);
     res.setHeader('Content-Type', 'application/json');
@@ -268,7 +269,7 @@ after(async () => {
     await once(proxyProcess, 'exit');
   }
   if (upstream) await new Promise(resolveClose => upstream.close(resolveClose));
-  try { unlinkSync(wireRecordPath); } catch {}
+  rmSync(wireRecordPath, { recursive: true, force: true });
 });
 
 test('健康检查和认证错误返回正确状态', async () => {
