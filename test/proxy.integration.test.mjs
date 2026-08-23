@@ -25,6 +25,7 @@ let lastNativeRequest = null;
 let lastWebSocketRequest = null;
 let lastWebSocketClosed = null;
 const generateCallCounts = new Map();
+const generateTraceparents = new Map();
 const fingerprintCallCounts = new Map();
 let proxyOutput = '';
 
@@ -112,6 +113,9 @@ before(async () => {
       lastGenerateBody = JSON.parse(bodyText);
       lastGenerateHeaders = req.headers;
       const authKey = req.headers.authorization || '';
+      const traceparents = generateTraceparents.get(authKey) || [];
+      traceparents.push(req.headers.traceparent);
+      generateTraceparents.set(authKey, traceparents);
       // 模拟上游限流：返回 429 + Retry-After 头，验证代理透传限流提示。
       // 必须在通用 writeHead(200) 之前处理，避免二次 writeHead 抛错。
       if (authKey.includes('user_rate_limited')) {
@@ -551,8 +555,8 @@ test('OpenAI 流式工具调用和参数透传正常', async () => {
   assert.match(body, /tool_calls/);
   assert.match(body, /call_tool/);
   assert.match(body, /data: \[DONE\]/);
-  assert.equal(lastGenerateBody.params.top_p, 0.25);
-  assert.deepEqual(lastGenerateBody.params.stop, ['END']);
+  assert.equal(lastGenerateBody.params.top_p, undefined);
+  assert.equal(lastGenerateBody.params.stop, undefined);
   assert.equal(lastGenerateBody.params.tools[0].name, 'lookup');
   assert.equal(lastGenerateBody.skills, null);
   assert.equal(lastGenerateBody.memory, null);
@@ -634,6 +638,11 @@ test('OpenAI 流式 pause_turn 会按同一会话继续请求', async () => {
   assert.match(body, /第一段/);
   assert.match(body, /Hello from upstream/);
   assert.match(body, /data: \[DONE\]/);
+  const traceparents = generateTraceparents.get('Bearer user_pause_continuation');
+  assert.equal(traceparents.length, 2);
+  const [firstTrace, secondTrace] = traceparents.map(value => value.split('-'));
+  assert.equal(firstTrace[1], secondTrace[1]);
+  assert.notEqual(firstTrace[2], secondTrace[2]);
 });
 
 test('Anthropic 非流式响应正确收集文本和 usage', async () => {

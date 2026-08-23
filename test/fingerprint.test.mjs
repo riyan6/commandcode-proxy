@@ -32,4 +32,15 @@ test('硬件字段按 key 派生：同 key 稳定、取值来自常见硬件池'
   assert.ok(first.components.cpuCount >= 4 && first.components.cpuCount <= 32);
   assert.ok(Number.isInteger(first.components.memGiB));
   assert.ok(first.components.memGiB >= 8 && first.components.memGiB <= 64);
+
+  // 平台与 CPU 架构必须互相匹配，不能再出现 Windows/Linux + Apple 芯片。
+  if (process.platform !== 'darwin') {
+    assert.doesNotMatch(first.components.cpuModel, /^Apple /);
+  }
+  if (process.platform === 'darwin' && process.arch === 'arm64') {
+    assert.match(first.components.cpuModel, /^Apple /);
+  }
+  if (first.components.isContainer && process.platform === 'linux' && process.arch === 'x64') {
+    assert.match(first.components.cpuModel, /(?:EPYC|Xeon)/);
+  }
 });

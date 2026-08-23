@@ -118,8 +118,10 @@ OpenAI Chat Completions compatible. Supports streaming, non-streaming, tool call
 | `temperature` | No | Sampling temperature (0-2) |
 | `reasoning_effort` | No | Reasoning intensity: `low`/`medium`/`high`/`xhigh`/`max` (model-dependent) |
 | `tools` | No | Tool definitions (OpenAI function calling format) |
-| `tool_choice` | No | Tool selection strategy |
-| `parallel_tool_calls` | No | Allow parallel tool calls |
+| `tool_choice` | No | Accepted but not sent upstream; the 1.32.1 CLI envelope does not contain this field |
+| `parallel_tool_calls` | No | Accepted but not sent upstream; the 1.32.1 CLI envelope does not contain this field |
+
+To keep the upstream envelope identical to the 1.32.1 CLI, `top_p`, `stop`, `user`, `presence_penalty`, `frequency_penalty`, `response_format`, `tool_choice`, and `parallel_tool_calls` are not forwarded upstream and therefore do not affect generation.
 
 **Simple request:**
 ```json
@@ -152,8 +154,7 @@ OpenAI Chat Completions compatible. Supports streaming, non-streaming, tool call
   "tools": [{
     "type": "function",
     "function": { "name": "get_weather", "description": "...", "parameters": {...} }
-  }],
-  "tool_choice": "auto"
+  }]
 }
 ```
 
@@ -218,7 +219,7 @@ Anthropic Messages API compatible endpoint. Supports streaming, non-streaming, a
 | Message content | `content` array (text/tool_use/tool_result) | Auto-mapped to corresponding roles |
 | Tool results | `tool_result` blocks in `user` messages | Auto-converted to `role: "tool"` |
 | Tool definitions | `input_schema` | Auto-mapped to `parameters` |
-| `tool_choice` | `{type:"auto"/"any"/"tool"}` | `any`→`required`, `tool`→function object |
+| `tool_choice` | `{type:"auto"/"any"/"tool"}` | Accepted but omitted upstream to preserve the 1.32.1 CLI envelope |
 | Reasoning | `thinking.budget_tokens` | Auto-mapped to `reasoning_effort` (≥100000→max, ≥30000→xhigh, ≥10000→high, ≥5000→medium, else low); `adaptive` mode passes `effort` through |
 | Stop reason | `end_turn`/`max_tokens`/`tool_use` | Auto-mapped to `stop`/`length`/`tool_calls` |
 | Token usage | `input_tokens`/`output_tokens` + cache | Passed through, cache fields mapped to Anthropic format |
@@ -413,8 +414,8 @@ Based on analysis of the local `command-code@1.32.1` bundle and captured 1.32.1 
 | **Stream Continuation** | Repeats `pause_turn` requests up to two times on the same thread |
 | **Server Tool Results** | 1.31.0 `tool-result` events (provider-executed) are silently skipped for OpenAI/Anthropic clients |
 | **Upstream Abort** | 1.31.0 `abort` event treated as a normal completion |
-| **Stable Fingerprint** | Latest CLI field shape, derived per API key and stable across restarts |
-| **OpenTelemetry** | `traceparent` (W3C Trace Context) |
+| **Stable Fingerprint** | A platform-matched device profile is derived per API key; CPU, core count, and memory stay coherent across restarts |
+| **OpenTelemetry** | One trace ID per request round, with a distinct span ID for each upstream call |
 | **Environment** | `x-cli-environment: production` |
 | **Workspace Identity** | A stable Git workspace is derived per API key; `workingDir` and `x-project-slug` always identify the same project |
 | **Reasoning Effort** | `reasoning_effort` pass-through (low/medium/high/xhigh/max, model-dependent) |

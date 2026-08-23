@@ -182,8 +182,11 @@ export function fakeProjectSlug(sessionId) {
     .replace(/^-+|-+$/g, '');
 }
 
-export function generateTraceparent() {
-  const traceId = crypto.randomBytes(16).toString('hex');
+export function generateTraceId() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+export function generateTraceparent(traceId = generateTraceId()) {
   const parentId = crypto.randomBytes(8).toString('hex');
   return `00-${traceId}-${parentId}-01`;
 }
@@ -241,6 +244,7 @@ export async function forwardToCC({
   apiKey,
   incomingHeaders = {},
   sessionId: providedSessionId,
+  traceId,
   signal,
   getSessionId,
 }) {
@@ -254,7 +258,8 @@ export async function forwardToCC({
       userAgent,
       projectSlug: projectSlug || fakeProjectSlug(sessionId),
       sessionId,
-      traceparent: generateTraceparent(),
+      // 同一轮请求（包括 pause_turn 续接）复用 trace ID，每次调用生成新 span ID。
+      traceparent: generateTraceparent(traceId),
       tasteLearningEnabled,
       oauthEnforced,
       cmdZdr,

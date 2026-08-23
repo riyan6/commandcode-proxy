@@ -289,16 +289,8 @@ export function buildCcRequest(openaiReq, {
     messages,
     max_tokens,
     temperature,
-    top_p,
-    stop,
-    user,
-    presence_penalty,
-    frequency_penalty,
-    response_format,
     tools,
     reasoning_effort,
-    tool_choice,
-    parallel_tool_calls,
   } = openaiReq;
 
   // 提取 system prompt；最新版 CLI 将 system 独立放在 params.system。
@@ -324,28 +316,11 @@ export function buildCcRequest(openaiReq, {
 
   const systemPrompt = systemMsgs.map(message => textFromContent(message.content)).filter(Boolean).join('\n');
 
-  // 只写入客户端明确提供的可选参数，避免覆盖上游默认值。
+  // 1.32.1 原生 CLI 只会附加 temperature 和 reasoning_effort；
+  // OpenAI 专属参数不能继续塞进上游信封，否则会形成稳定的协议特征。
   if (systemPrompt) body.params.system = systemPrompt;
   if (temperature !== undefined) body.params.temperature = temperature;
-  if (top_p !== undefined) body.params.top_p = top_p;
-  if (stop !== undefined) body.params.stop = stop;
-  if (user !== undefined) body.params.user = user;
-  if (presence_penalty !== undefined) body.params.presence_penalty = presence_penalty;
-  if (frequency_penalty !== undefined) body.params.frequency_penalty = frequency_penalty;
-  if (response_format !== undefined) body.params.response_format = response_format;
   if (reasoning_effort !== undefined) body.params.reasoning_effort = reasoning_effort;
-
-  if (tool_choice !== undefined) {
-    if (typeof tool_choice === 'string') {
-      const map = { auto: 'auto', none: 'none', required: 'any' };
-      body.params.tool_choice = { type: map[tool_choice] || 'auto' };
-    } else if (tool_choice.type === 'function') {
-      body.params.tool_choice = { type: 'tool', name: tool_choice.function?.name };
-    } else {
-      body.params.tool_choice = tool_choice;
-    }
-  }
-  if (parallel_tool_calls !== undefined) body.params.parallel_tool_calls = parallel_tool_calls;
 
   return body;
 }

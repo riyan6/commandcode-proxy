@@ -20,6 +20,7 @@ import {
   filterProxyHeaders,
   forwardNativeToCC,
   forwardToCC,
+  generateTraceId,
   generateTraceparent,
   isCommandCodeNativePath,
   tunnelNativeWebSocket,
@@ -721,6 +722,7 @@ async function handleChatCompletions(req, res) {
   const threadId = getThreadId(req.headers, openaiReq) || sessionId;
   const serverConfig = buildFakeWorkspace(`${CFG.fingerprintSalt}:${apiKey}`);
   const projectSlug = CFG.projectSlug || projectSlugFromWorkspace(serverConfig);
+  const traceId = generateTraceId();
   const ccBody = buildCcRequest(openaiReq, {
     threadId,
     mode: CFG.mode,
@@ -768,6 +770,7 @@ async function handleChatCompletions(req, res) {
       apiKey,
       incomingHeaders: req.headers,
       sessionId: threadId,
+      traceId,
       signal: abortController.signal,
       getSessionId: state.getSessionId,
     });
@@ -1221,6 +1224,7 @@ async function handleMessages(req, res) {
   const threadId = getThreadId(req.headers, anthropicReq) || sessionId;
   const serverConfig = buildFakeWorkspace(`${CFG.fingerprintSalt}:${apiKey}`);
   const projectSlug = CFG.projectSlug || projectSlugFromWorkspace(serverConfig);
+  const traceId = generateTraceId();
   const ccBody = buildCcRequest(openaiReq, {
     threadId,
     mode: CFG.mode,
@@ -1264,6 +1268,7 @@ async function handleMessages(req, res) {
       apiKey,
       incomingHeaders: req.headers,
       sessionId: threadId,
+      traceId,
       signal: abortController.signal,
       getSessionId: state.getSessionId,
     });

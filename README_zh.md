@@ -118,8 +118,10 @@ OpenAI Chat Completions 兼容。支持流式和非流式、工具调用、多�
 | `temperature` | 否 | 采样温度（0-2）|
 | `reasoning_effort` | 否 | 推理强度 `low`/`medium`/`high`/`xhigh`/`max`（是否支持取决于模型） |
 | `tools` | 否 | 工具定义（OpenAI function calling 格式）|
-| `tool_choice` | 否 | 工具选择策略 |
-| `parallel_tool_calls` | 否 | 是否允许并行工具调用 |
+| `tool_choice` | 否 | 接受但不发送给上游；1.32.1 CLI 信封不包含该字段 |
+| `parallel_tool_calls` | 否 | 接受但不发送给上游；1.32.1 CLI 信封不包含该字段 |
+
+为保持上游信封与 1.32.1 CLI 一致，`top_p`、`stop`、`user`、`presence_penalty`、`frequency_penalty`、`response_format`、`tool_choice` 和 `parallel_tool_calls` 不会转发给上游，因此不会影响实际生成。
 
 **简单请求：**
 ```json
@@ -152,8 +154,7 @@ OpenAI Chat Completions 兼容。支持流式和非流式、工具调用、多�
   "tools": [{
     "type": "function",
     "function": { "name": "get_weather", "description": "...", "parameters": {...} }
-  }],
-  "tool_choice": "auto"
+  }]
 }
 ```
 
@@ -218,7 +219,7 @@ Anthropic Messages API 兼容端点。支持流式和非流式、工具调用。
 | 消息内容 | `content` 数组（text/tool_use/tool_result） | 自动映射为对应角色 |
 | 工具结果 | `user` 消息中的 `tool_result` 块 | 自动转为 `role: "tool"` |
 | 工具定义 | `input_schema` | 自动映射为 `parameters` |
-| `tool_choice` | `{type:"auto"/"any"/"tool"}` | `any`→`required`，`tool`→function 对象 |
+| `tool_choice` | `{type:"auto"/"any"/"tool"}` | 接受但不发送给上游，以保持 1.32.1 CLI 信封一致 |
 | 推理强度 | `thinking.budget_tokens` | 自动映射为 `reasoning_effort`（≥100000→max, ≥30000→xhigh, ≥10000→high, ≥5000→medium, 否则 low）；`adaptive` 模式直接透传 `effort` |
 | 停止原因 | `end_turn`/`max_tokens`/`tool_use` | 自动映射为 `stop`/`length`/`tool_calls` |
 | Token 用量 | `input_tokens`/`output_tokens` + 缓存 | 透传，缓存字段映射为 Anthropic 格式 |
@@ -413,8 +414,8 @@ claude
 | **流式续接** | `pause_turn` 最多按同一请求线程继续两次 |
 | **服务端工具结果** | 1.31.0 的 `tool-result` 事件（provider 执行）对 OpenAI/Anthropic 客户端静默跳过 |
 | **上游 abort** | 1.31.0 的 `abort` 事件视为正常结束 |
-| **稳定指纹** | 按 API Key 派生最新版 CLI 所需的指纹字段，重启后保持稳定 |
-| **OpenTelemetry** | `traceparent` (W3C Trace Context) |
+| **稳定指纹** | 按 API Key 派生平台匹配的完整设备档案，CPU、核心数和内存保持一致，重启后稳定 |
+| **OpenTelemetry** | 同一轮请求复用 trace ID，每次上游调用生成独立 span ID |
 | **环境标识** | `x-cli-environment: production` |
 | **工作区身份** | 按 API Key 派生稳定 Git 工作区，`workingDir` 与 `x-project-slug` 始终指向同一项目 |
 | **思考强度** | `reasoning_effort` 透传 (low/medium/high/xhigh/max，是否支持取决于模型) |

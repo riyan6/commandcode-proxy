@@ -197,6 +197,36 @@ test('OpenAI 路径的 reasoning_effort 原样透传到 CC 请求体', () => {
   assert.equal(maxBody.params.reasoning_effort, 'max');
 });
 
+test('1.32.1 请求信封过滤 OpenAI 专属可选参数', () => {
+  const body = buildCcRequest({
+    model: 'demo-model',
+    messages: [{ role: 'user', content: 'hi' }],
+    temperature: 0.4,
+    top_p: 0.8,
+    stop: ['END'],
+    user: 'client-user',
+    presence_penalty: 0.2,
+    frequency_penalty: 0.3,
+    response_format: { type: 'json_object' },
+    tool_choice: 'required',
+    parallel_tool_calls: false,
+  });
+
+  assert.equal(body.params.temperature, 0.4);
+  for (const key of [
+    'top_p',
+    'stop',
+    'user',
+    'presence_penalty',
+    'frequency_penalty',
+    'response_format',
+    'tool_choice',
+    'parallel_tool_calls',
+  ]) {
+    assert.equal(body.params[key], undefined, key);
+  }
+});
+
 test('空的 assistant/user 消息被跳过，避免 CC 后端拒绝', () => {
   const body = buildCcRequest({
     model: 'demo-model',
