@@ -1,8 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAnthropicResponse, buildCcRequest, normalizeUsage, getCacheReadTokens, convertAnthropicToOpenAI } from '../src/adapters.mjs';
+import {
+  buildAnthropicResponse,
+  buildCcRequest,
+  buildFakeWorkspace,
+  convertAnthropicToOpenAI,
+  getCacheReadTokens,
+  normalizeUsage,
+  projectSlugFromWorkspace,
+} from '../src/adapters.mjs';
 
-test('请求体与 command-code 1.31.0 的 CLI 信封和工具格式一致', () => {
+test('请求体与 command-code 1.32.1 的 CLI 信封和工具格式一致', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [
@@ -48,6 +56,27 @@ test('请求体与 command-code 1.31.0 的 CLI 信封和工具格式一致', () 
   assert.equal(body.params.messages[2].content[0].toolName, 'lookup');
   assert.deepEqual(body.params.messages.map(message => message.role), ['user', 'assistant', 'tool']);
   assert.ok(body.params.messages.every(message => Array.isArray(message.content)));
+});
+
+test('伪工作区按 Key 稳定并符合 1.32.1 的 Git 字段形状', () => {
+  const first = buildFakeWorkspace('salt:user_a');
+  const again = buildFakeWorkspace('salt:user_a');
+  const other = buildFakeWorkspace('salt:user_b');
+
+  assert.deepEqual(first, again);
+  assert.notDeepEqual(first, other);
+  assert.equal(first.isGitRepo, true);
+  assert.match(first.currentBranch, /^(?:main|master|feat\/[a-z-]+|fix\/[a-z-]+)$/);
+  assert.match(first.mainBranch, /^(?:main|master)$/);
+  assert.match(first.gitStatus, /^(?:Working tree clean| M .+)$/);
+  assert.equal(first.recentCommits.length, 3);
+  assert.ok(first.recentCommits.every(commit => /^[0-9a-f]{7} .+/.test(commit)));
+  assert.ok(first.structure.length > 0);
+  assert.ok(first.structure.every(entry => !entry.startsWith('.')));
+  assert.equal(
+    projectSlugFromWorkspace(first),
+    first.workingDir.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
+  );
 });
 
 test('兼容 Agent 的 developer 和旧式 function 消息格式', () => {

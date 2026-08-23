@@ -17,6 +17,9 @@ let proxyUrl;
 let lastGenerateBody = null;
 let lastGenerateHeaders = null;
 let lastFingerprintBody = null;
+let lastFingerprintHeaders = null;
+let lastLifecycleBody = null;
+let lastLifecycleHeaders = null;
 let lastModelsHeaders = null;
 let lastNativeRequest = null;
 let lastWebSocketRequest = null;
@@ -65,6 +68,7 @@ before(async () => {
 
     if (req.url === '/alpha/fingerprint/record') {
       lastFingerprintBody = JSON.parse(bodyText);
+      lastFingerprintHeaders = req.headers;
       const fingerprintAuthKey = req.headers.authorization || '';
       const fingerprintCount = (fingerprintCallCounts.get(fingerprintAuthKey) || 0) + 1;
       fingerprintCallCounts.set(fingerprintAuthKey, fingerprintCount);
@@ -80,6 +84,8 @@ before(async () => {
     }
 
     if (req.url === '/alpha/lifecycle-events') {
+      lastLifecycleBody = JSON.parse(bodyText);
+      lastLifecycleHeaders = req.headers;
       res.writeHead(200);
       res.end('{}');
       return;
@@ -555,19 +561,35 @@ test('OpenAI 流式工具调用和参数透传正常', async () => {
   assert.deepEqual(lastGenerateBody.params.messages.map(message => message.role), ['user']);
   assert.ok(lastGenerateBody.params.messages.every(message => Array.isArray(message.content)));
   assert.equal(lastGenerateBody.config.environment, process.platform);
-  assert.ok(Array.isArray(lastGenerateBody.config.structure));
+  assert.equal(lastGenerateBody.config.isGitRepo, true);
+  assert.ok(lastGenerateBody.config.structure.length > 0);
+  assert.match(lastGenerateBody.config.currentBranch, /^(?:main|master|feat\/[a-z-]+|fix\/[a-z-]+)$/);
+  assert.match(lastGenerateBody.config.mainBranch, /^(?:main|master)$/);
+  assert.equal(lastGenerateBody.config.recentCommits.length, 3);
+  assert.ok(lastGenerateBody.config.recentCommits.every(commit => /^[0-9a-f]{7} .+/.test(commit)));
   assert.equal(lastGenerateBody.mode, 'agent');
   assert.equal(lastGenerateBody.permissionMode, 'standard');
   assert.equal(lastGenerateBody.threadId, '123e4567-e89b-12d3-a456-426614174000');
   assert.equal(lastGenerateBody.params.tools[0].type, undefined);
   assert.equal(lastGenerateHeaders['user-agent'], 'cli');
   assert.match(lastGenerateHeaders['x-command-code-version'], /^\d+\.\d+\.\d+(?:[-+].+)?$/);
-  assert.match(lastGenerateHeaders['x-session-id'], /^sess_[0-9a-f]{16}$/);
-  // projectSlug 默认为空时按会话伪造 slug，而不是向上游暴露固定值 "cc-proxy"。
-  assert.match(lastGenerateHeaders['x-project-slug'], /^users-dev-projects-[a-z]+-[0-9a-f]{4}$/);
+  assert.equal(lastGenerateHeaders['x-session-id'], lastGenerateBody.threadId);
+  // projectSlug 由同一个伪 workingDir 生成，不能与 config 指向不同项目。
+  const expectedProjectSlug = lastGenerateBody.config.workingDir
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  assert.equal(lastGenerateHeaders['x-project-slug'], expectedProjectSlug);
   assert.equal(lastFingerprintBody.components.runtime, 'cli');
   assert.equal(lastFingerprintBody.components.collectorVersion, 1);
   assert.equal(lastFingerprintBody.components.platform, process.platform);
+  assert.equal(lastFingerprintHeaders['x-project-slug'], undefined);
+  assert.equal(lastFingerprintHeaders['x-session-id'], undefined);
+  assert.equal(lastFingerprintHeaders['x-taste-learning'], undefined);
+  assert.equal(lastLifecycleBody.eventType, 'cli_session_exists');
+  assert.match(lastLifecycleBody.metadata.sessionId, /^sess_[0-9a-f]{16}$/);
+  assert.equal(lastLifecycleBody.metadata.cliVersion, '1.32.1');
+  assert.equal(lastLifecycleHeaders['x-project-slug'], undefined);
 });
 
 test('Anthropic 流式文本转换正常', async () => {

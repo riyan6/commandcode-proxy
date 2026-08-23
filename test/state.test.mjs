@@ -16,8 +16,9 @@ test('运行时状态按 API Key 隔离', () => {
 
   assert.equal(store.getTimeoutCount(keyA), 2);
   assert.equal(store.getTimeoutCount(keyB), 1);
-  assert.match(store.getSessionId({}, keyA), /^sess_[0-9a-f]{16}$/);
+  assert.match(store.getSessionId({}, keyA), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(store.getSessionId({}, keyA), store.getSessionId({}, keyA));
+  assert.match(store.getOrCreateKeyState(keyA).telemetrySessionId, /^sess_[0-9a-f]{16}$/);
 
   store.setCachedModels(keyA, [{ id: 'model-a' }]);
   assert.deepEqual(store.getCachedModels(keyA, 60_000), [{ id: 'model-a' }]);

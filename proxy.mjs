@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { createWriteStream, mkdirSync } from 'fs';
 import { dirname as pathDirname } from 'path';
 import { pipeline } from 'stream/promises';
+import { Transform } from 'stream';
 import { loadConfig } from './src/config.mjs';
 import { createStateStore } from './src/state.mjs';
 import { generateFingerprint } from './src/fingerprint.mjs';
@@ -16,7 +17,6 @@ import { beginRequest, createMetricsStore } from './src/metrics.mjs';
 import { DASHBOARD_HTML } from './src/dashboard.mjs';
 import {
   buildCommandCodeHeaders,
-  fakeProjectSlug,
   filterProxyHeaders,
   forwardNativeToCC,
   forwardToCC,
@@ -27,15 +27,17 @@ import {
 import {
   buildAnthropicResponse,
   buildCcRequest,
+  buildFakeWorkspace,
   convertAnthropicToOpenAI,
   createAnthropicSseTranslator,
   mapFinishReason,
   normalizeUsage,
+  projectSlugFromWorkspace,
 } from './src/adapters.mjs';
 
 const CFG = loadConfig();
 
-// 请求体和字段转换固定按 command-code@1.31.0 实现，避免协议随上游版本漂移。
+// 请求体和字段转换固定按 command-code@1.32.1 实现，避免协议随上游版本漂移。
 // 发送给上游的 x-command-code-version 头与实现基线保持一致（protocolVersion），
 // 不再跟随 npm latest，避免“头版本新但特性旧”被后端识别出代理伪装。
 const CC_VERSION = CFG.protocolVersion;
@@ -103,7 +105,7 @@ const INIT_RETRY_MS = Number.isFinite(INIT_RETRY_MS_ENV) && INIT_RETRY_MS_ENV > 
   ? INIT_RETRY_MS_ENV
   : 5 * 60 * 1000;
 
-async function ensureInitialized(apiKey, signal, incomingHeaders = {}) {
+async function ensureInitialized(apiKey, signal) {
   const keyState = state.getOrCreateKeyState(apiKey);
   const now = Date.now();
   if (now < keyState.nextInitAt) return;
@@ -112,24 +114,42 @@ async function ensureInitialized(apiKey, signal, incomingHeaders = {}) {
   if (keyState.initInFlight) return keyState.initInFlight;
   keyState.initInFlight = (async () => {
     try {
-      // 指纹和生成请求使用同一会话标识、同一 project slug 规则及公共 CLI 请求头。
-      // 1.31.0 已移除 /alpha/lifecycle-events 端点（改为 telemetry 内部事件），
-      // 这里只保留 fingerprint/record 初始化。
-      const sessionId = state.getSessionId(incomingHeaders, apiKey);
+      // 指纹与 lifecycle 使用通用 API 请求头；真实 CLI 不会在这里发送
+      // x-project-slug、x-session-id 或 x-taste-learning。
       const headers = buildCommandCodeHeaders({
         apiKey,
         commandCodeVersion: CC_VERSION,
         cliEnvironment: CFG.cliEnvironment,
         userAgent: CFG.userAgent,
-        projectSlug: CFG.projectSlug || fakeProjectSlug(sessionId),
-        sessionId,
-        traceparent: generateTraceparent(),
-        tasteLearningEnabled: CFG.tasteLearningEnabled,
-        oauthEnforced: CFG.oauthEnforced,
         cmdZdr: CFG.cmdZdr,
-        ossPrimaryProvider: CFG.ossPrimaryProvider,
       });
       const fingerprint = keyState.fingerprint || {};
+
+      // 真实 CLI（1.32.1 抓包实测）会话建立时 POST /alpha/lifecycle-events：
+      // {"eventType":"cli_session_exists","metadata":{"sessionId":"sess_…","cliVersion":"…","mode":"interactive","os":"win32-x64"}}
+      // 之前的注释"1.31.0 已移除该端点"与实测不符；失败不阻塞主流程。
+      try {
+        const lifecycleResponse = await fetch(`${CFG.apiBase}/alpha/lifecycle-events`, {
+          method: 'POST',
+          headers,
+          signal,
+          body: JSON.stringify({
+            eventType: 'cli_session_exists',
+            metadata: {
+              sessionId: keyState.telemetrySessionId,
+              cliVersion: CC_VERSION,
+              mode: 'interactive',
+              os: `${process.platform}-${process.arch}`,
+            },
+          }),
+        });
+        if (!lifecycleResponse.ok) {
+          log('debug', 'Lifecycle event rejected', { status: lifecycleResponse.status });
+        }
+      } catch (error) {
+        if (error.name === 'AbortError') throw error;
+        log('debug', 'Lifecycle event failed', { error: error.message });
+      }
 
       const response = await fetch(`${CFG.apiBase}/alpha/fingerprint/record`, {
         method: 'POST', headers, signal,
@@ -695,11 +715,18 @@ async function handleChatCompletions(req, res) {
   const created = nowUnix();
   const requestMetrics = beginRequest(metrics, { path: '/v1/chat/completions', model, stream });
 
-  // 构建 CC 请求体
+  // 构建 CC 请求体：threadId 优先取客户端传入，未传时用会话 ID
+  // （真实 CLI 的 threadId 与 x-session-id 相同，均为 UUID，整个会话不变）。
+  const sessionId = state.getSessionId(req.headers, apiKey);
+  const threadId = getThreadId(req.headers, openaiReq) || sessionId;
+  const serverConfig = buildFakeWorkspace(`${CFG.fingerprintSalt}:${apiKey}`);
+  const projectSlug = CFG.projectSlug || projectSlugFromWorkspace(serverConfig);
   const ccBody = buildCcRequest(openaiReq, {
-    threadId: getThreadId(req.headers, openaiReq),
+    threadId,
     mode: CFG.mode,
     permissionMode: CFG.permissionMode,
+    // 按 key 派生稳定伪工作区，项目路径与请求头中的 slug 保持一致。
+    serverConfig,
   });
 
   // debug 级别打印发送给 CC 的 messages 结构（只含 role 与 content 类型，不含文本内容）。
@@ -725,11 +752,11 @@ async function handleChatCompletions(req, res) {
 
   try {
     // 首次初始化（fingerprint）
-    await ensureInitialized(apiKey, abortController.signal, req.headers);
+    await ensureInitialized(apiKey, abortController.signal);
     // 转发到 CC API（传入客户端 headers，用于提取 session ID）
     const forwardRequest = () => forwardToCC({
       apiBase: CFG.apiBase,
-      projectSlug: CFG.projectSlug,
+      projectSlug,
       commandCodeVersion: CC_VERSION,
       cliEnvironment: CFG.cliEnvironment,
       userAgent: CFG.userAgent,
@@ -740,6 +767,7 @@ async function handleChatCompletions(req, res) {
       body: ccBody,
       apiKey,
       incomingHeaders: req.headers,
+      sessionId: threadId,
       signal: abortController.signal,
       getSessionId: state.getSessionId,
     });
@@ -1187,12 +1215,17 @@ async function handleMessages(req, res) {
   const model = anthropicReq.model || 'claude-sonnet-4-6';
   const requestMetrics = beginRequest(metrics, { path: '/v1/messages', model, stream });
 
-  // Convert Anthropic → OpenAI → CC
+  // Convert Anthropic → OpenAI → CC：threadId 规则与 OpenAI 端点一致。
   const openaiReq = convertAnthropicToOpenAI(anthropicReq);
+  const sessionId = state.getSessionId(req.headers, apiKey);
+  const threadId = getThreadId(req.headers, anthropicReq) || sessionId;
+  const serverConfig = buildFakeWorkspace(`${CFG.fingerprintSalt}:${apiKey}`);
+  const projectSlug = CFG.projectSlug || projectSlugFromWorkspace(serverConfig);
   const ccBody = buildCcRequest(openaiReq, {
-    threadId: getThreadId(req.headers, anthropicReq),
+    threadId,
     mode: CFG.mode,
     permissionMode: CFG.permissionMode,
+    serverConfig,
   });
 
   // debug 级别打印发送给 CC 的 messages 结构（只含 role 与 content 类型，不含文本内容），
@@ -1216,10 +1249,10 @@ async function handleMessages(req, res) {
 
   try {
     // 首次初始化（fingerprint）
-    await ensureInitialized(apiKey, abortController.signal, req.headers);
+    await ensureInitialized(apiKey, abortController.signal);
     const forwardRequest = () => forwardToCC({
       apiBase: CFG.apiBase,
-      projectSlug: CFG.projectSlug,
+      projectSlug,
       commandCodeVersion: CC_VERSION,
       cliEnvironment: CFG.cliEnvironment,
       userAgent: CFG.userAgent,
@@ -1230,6 +1263,7 @@ async function handleMessages(req, res) {
       body: ccBody,
       apiKey,
       incomingHeaders: req.headers,
+      sessionId: threadId,
       signal: abortController.signal,
       getSessionId: state.getSessionId,
     });

@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 
 // 集中管理运行时状态，避免不同 API Key 之间共享计数或模型缓存。
 export function createStateStore({ generateFingerprint, log }) {
@@ -25,8 +25,9 @@ export function createStateStore({ generateFingerprint, log }) {
     }
 
     const jitter = Math.floor(Math.random() * sessionJitterMs);
-    // 最新 CLI 使用 sess_ 前缀加 16 位十六进制随机值。
-    const sessionId = `sess_${randomBytes(8).toString('hex')}`;
+    // 真实抓包（1.32.1）显示 x-session-id 是 UUID（与 threadId 相同，每个会话一个）；
+    // sess_ 前缀 + 16 位十六进制格式只出现在 lifecycle-events 载荷里。
+    const sessionId = randomUUID();
     sessionStore.set(apiKey, {
       sessionId,
       expiresAt: now + sessionDurationMs + jitter,
@@ -55,6 +56,8 @@ export function createStateStore({ generateFingerprint, log }) {
     if (!state) {
       state = {
         fingerprint: generateFingerprint(apiKey),
+        // lifecycle-events 使用独立的 CLI 遥测会话 ID，不与请求线程 UUID 混用。
+        telemetrySessionId: `sess_${randomBytes(8).toString('hex')}`,
         nextInitAt: 0,
         consecutiveTimeouts: 0,
         lastUsedAt: Date.now(),

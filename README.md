@@ -4,7 +4,7 @@
 
 A reverse proxy that converts Command Code API to OpenAI / Anthropic compatible endpoints. Node.js ESM with zero external dependencies.
 
-Built by analyzing the local `command-code@1.31.0` CLI bundle and aligning the Command Code API request protocol.
+Built by analyzing the local `command-code@1.32.1` CLI bundle and aligning the Command Code API request protocol.
 
 **Features**: Native Command Code HTTP/WebSocket pass-through | OpenAI Chat Completions + Anthropic Messages API | Streaming & non-streaming | Tool calling (tool_use) | Multimodal image input | Reasoning effort | Dynamic model list | Cache hit metrics | Client disconnect detection with upstream abort | Zero-output → 429 auto-retry | Consecutive timeout → 429 auto-retry | Privacy-aware logging
 
@@ -62,7 +62,7 @@ commandcode/
 | `port` | `3050` | Listen port |
 | `host` | `0.0.0.0` | Listen address |
 | `apiBase` | `https://api.commandcode.ai` | CC API base URL |
-| `protocolVersion` | `1.31.0` | Protocol implementation baseline; also sent as the `x-command-code-version` header |
+| `protocolVersion` | `1.32.1` | Protocol implementation baseline; also sent as the `x-command-code-version` header |
 | `cliEnvironment` | `production` | `x-cli-environment` header |
 | `userAgent` | `cli` | CLI User-Agent |
 | `projectSlug` | `""` (per-session fake slug) | `x-project-slug` header |
@@ -280,14 +280,14 @@ Proxy-side runtime metrics (for token usage see the official Command Code dashbo
 
 ### Native Command Code Pass-Through
 
-The proxy forwards native Command Code API requests on the same path. `/alpha/*`, `/provider/*`, and the `/beta/*` and `/internal/*` namespaces declared by the 1.31.0 bundle are sent only to the configured `apiBase`. Other paths are not forwarded, so this is not an arbitrary URL proxy.
+The proxy forwards native Command Code API requests on the same path. `/alpha/*`, `/provider/*`, and the `/beta/*` and `/internal/*` namespaces declared by the 1.32.1 bundle are sent only to the configured `apiBase`. Other paths are not forwarded, so this is not an arbitrary URL proxy.
 
 Native requests preserve the HTTP method, query, raw body bytes, authentication/OAuth/cookie headers, upstream status, response headers, and response stream. Only hop-by-hop headers such as `Host`, `Connection`, and `Transfer-Encoding` are removed; 3xx responses are not followed automatically. The 10MB request limit still applies. Use a dedicated hostname for the native endpoint in production so it does not share cookies with unrelated web applications.
 
 ```bash
 curl http://127.0.0.1:3050/alpha/whoami \
   -H "Authorization: Bearer user_xxxxxxxxx" \
-  -H "x-command-code-version: 1.31.0"
+  -H "x-command-code-version: 1.32.1"
 ```
 
 `POST /alpha/generate` returns the native newline-delimited JSON stream without converting it to OpenAI SSE. Sandbox real-time connections use a WebSocket tunnel on the same path, such as `ws://127.0.0.1:3050/alpha/sandbox/stream/...`. External OAuth, npm updates, telemetry, and user-configured MCP origins are outside the Command API origin and are not proxied by this endpoint.
@@ -402,12 +402,12 @@ claude
 
 ## Anti-Detection
 
-Based on analysis of the local `command-code@1.31.0` bundle:
+Based on analysis of the local `command-code@1.32.1` bundle and captured 1.32.1 CLI traffic:
 
 | Mechanism | Implementation |
 |-----------|---------------|
 | **Per-Key Session** | One session per API key, 12h expiry + 1h random jitter |
-| **Protocol Baseline / Version Header** | Request envelope and `x-command-code-version` are both pinned to `1.31.0` (`protocolVersion`); no longer follows npm latest, so the advertised version always matches the implemented protocol |
+| **Protocol Baseline / Version Header** | Request envelope and `x-command-code-version` are both pinned to `1.32.1` (`protocolVersion`); no longer follows npm latest, so the advertised version always matches the implemented protocol |
 | **CLI Envelope** | config/memory/taste/skills/permissionMode/mode/params/threadId |
 | **Tools & Images** | Latest wire format for tools, base64 images and mimeType; tool-result now backfills `toolName` |
 | **Stream Continuation** | Repeats `pause_turn` requests up to two times on the same thread |
@@ -416,7 +416,7 @@ Based on analysis of the local `command-code@1.31.0` bundle:
 | **Stable Fingerprint** | Latest CLI field shape, derived per API key and stable across restarts |
 | **OpenTelemetry** | `traceparent` (W3C Trace Context) |
 | **Environment** | `x-cli-environment: production` |
-| **Project Slug** | Custom `x-project-slug` |
+| **Workspace Identity** | A stable Git workspace is derived per API key; `workingDir` and `x-project-slug` always identify the same project |
 | **Reasoning Effort** | `reasoning_effort` pass-through (low/medium/high/xhigh/max, model-dependent) |
 | **Key Validation** | Regex `user_[a-zA-Z0-9_-]+`, auto-cleans extra paths/prefixes, rejects `sk-xxx` format |
 | **Stream Timeout** | 30s streaming / 90s non-streaming → 429 with SDK auto-retry |
@@ -432,15 +432,19 @@ Based on analysis of the local `command-code@1.31.0` bundle:
 ```json
 {
   "config": {
-    "workingDir": "C:\\project",
+    "workingDir": "C:\\Users\\alex\\projects\\app",
     "date": "2026-06-07",
     "environment": "linux",
-    "structure": [],
-    "isGitRepo": false,
-    "currentBranch": "",
-    "mainBranch": "",
-    "gitStatus": "",
-    "recentCommits": []
+    "structure": ["package.json", "README.md", "src", "tsconfig.json"],
+    "isGitRepo": true,
+    "currentBranch": "feat/streaming",
+    "mainBranch": "main",
+    "gitStatus": "Working tree clean",
+    "recentCommits": [
+      "a1b2c3d fix: handle streaming edge cases",
+      "d4e5f6a feat: add streaming support",
+      "b7c8d9e chore: update dependencies"
+    ]
   },
   "memory": null,
   "taste": null,
@@ -459,7 +463,7 @@ Based on analysis of the local `command-code@1.31.0` bundle:
 }
 ```
 
-`threadId` is sent only when the client provides a valid UUID through `x-thread-id` or `x-command-code-thread-id`; otherwise it is omitted as in the latest CLI.
+When the client does not provide a valid `threadId`, the proxy creates one UUID per API key session. The same UUID is sent as both `threadId` and `x-session-id`, matching the 1.32.1 CLI.
 
 ### CC API Image Message Format
 

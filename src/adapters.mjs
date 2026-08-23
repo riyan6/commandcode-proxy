@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { readWithTimeout } from './stream.mjs';
 
 // 请求适配器：负责 OpenAI、Anthropic 与 Command Code 之间的纯数据转换。
@@ -191,6 +191,77 @@ function buildServerConfig(serverConfig = {}) {
     recentCommits: [],
     ...serverConfig,
   };
+}
+
+// ── 伪工作区 ─────────────────────────────────────────
+// 真实抓包（1.32.1，RECORD_WIRE）显示：CLI 总是发送 cwd 的真实路径与
+// 顶层文件列表（structure），空列表在真实流量中几乎不存在。
+// 这里按 API Key 种子派生一个稳定、形状与实测一致的伪工作区。
+const WORKSPACE_STRUCTURES = [
+  ['package.json', 'public', 'README.md', 'src', 'tsconfig.json', 'vite.config.ts'],
+  ['package.json', 'src', 'tsconfig.json', 'README.md', 'next.config.js', 'app', 'public'],
+  ['package.json', 'src', 'tsconfig.json', 'README.md', 'babel.config.js', 'config', 'yarn.lock'],
+  ['pyproject.toml', 'README.md', 'requirements.txt', 'src', 'tests'],
+  ['go.mod', 'README.md', 'cmd', 'internal', 'pkg', 'go.sum'],
+  ['package.json', 'src', 'tsconfig.json', 'README.md', 'rollup.config.js', 'dist'],
+];
+const WORKSPACE_NAMES = ['app', 'api', 'backend', 'dashboard', 'webapp', 'server', 'platform', 'portal', 'admin', 'cli-tool'];
+const USER_NAMES = ['alex', 'chen', 'dev', 'jordan', 'lee', 'morgan', 'sam', 'taylor'];
+const BRANCH_TOPICS = ['auth', 'cache', 'dashboard', 'logging', 'metrics', 'streaming'];
+
+function seededIndex(seed, label, modulo) {
+  const digest = createHash('sha256').update(`${seed}:${label}`).digest();
+  return digest.readUInt32BE(0) % modulo;
+}
+
+function seededHex(seed, label, length = 7) {
+  return createHash('sha256').update(`${seed}:${label}`).digest('hex').slice(0, length);
+}
+
+// 生成按 key 稳定的伪工作区。1.32.1 的 recentCommits 来自
+// `git log --oneline -3`，所以每项是“短哈希 + 标题”，不包含日期字段。
+export function buildFakeWorkspace(seed) {
+  const name = WORKSPACE_NAMES[seededIndex(seed, 'ws-name', WORKSPACE_NAMES.length)];
+  const user = USER_NAMES[seededIndex(seed, 'ws-user', USER_NAMES.length)];
+  const structure = [...WORKSPACE_STRUCTURES[seededIndex(seed, 'ws-structure', WORKSPACE_STRUCTURES.length)]].sort();
+  const mainBranch = seededIndex(seed, 'main-branch', 4) === 0 ? 'master' : 'main';
+  const topic = BRANCH_TOPICS[seededIndex(seed, 'branch-topic', BRANCH_TOPICS.length)];
+  const branchKind = seededIndex(seed, 'branch-kind', 4);
+  const currentBranch = branchKind < 2
+    ? mainBranch
+    : `${branchKind === 2 ? 'feat' : 'fix'}/${topic}`;
+  const workingDir = process.platform === 'win32'
+    ? `C:\\Users\\${user}\\projects\\${name}`
+    : process.platform === 'darwin'
+      ? `/Users/${user}/Projects/${name}`
+      : `/home/${user}/projects/${name}`;
+  const dirty = seededIndex(seed, 'git-status', 4) === 0;
+  const changedFile = structure.includes('go.mod')
+    ? 'internal/server.go'
+    : structure.includes('pyproject.toml')
+      ? 'src/main.py'
+      : 'src/index.ts';
+  return {
+    workingDir,
+    structure,
+    isGitRepo: true,
+    currentBranch,
+    mainBranch,
+    gitStatus: dirty ? ` M ${changedFile}` : 'Working tree clean',
+    recentCommits: [
+      `${seededHex(seed, 'commit-1')} fix: handle ${topic} edge cases`,
+      `${seededHex(seed, 'commit-2')} feat: add ${topic} support`,
+      `${seededHex(seed, 'commit-3')} chore: update dependencies`,
+    ],
+  };
+}
+
+// x-project-slug 由同一个 workingDir 生成，避免请求头和 config 指向两个项目。
+export function projectSlugFromWorkspace(workspace) {
+  return String(workspace?.workingDir || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 function normalizePermissionMode(permissionMode) {

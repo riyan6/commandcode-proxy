@@ -178,7 +178,6 @@ export function fakeProjectSlug(sessionId) {
   const path = `C:\\Users\\dev\\projects\\${name}-${suffix}`;
   return path
     .toLowerCase()
-    .replace(/^[a-z]:/i, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 }
@@ -190,7 +189,7 @@ export function generateTraceparent() {
 }
 
 // 统一构造最新版 CLI 使用的公共请求头，初始化、生成和模型请求共用同一套规则。
-// 请求头字段对齐 command-code@1.31.0 的 buildCommandAuthHeaders。
+// 请求头字段对齐 command-code@1.32.1 的 buildCommandAuthHeaders。
 export function buildCommandCodeHeaders({
   apiKey,
   commandCodeVersion,
@@ -199,7 +198,7 @@ export function buildCommandCodeHeaders({
   projectSlug,
   sessionId,
   traceparent,
-  tasteLearningEnabled = false,
+  tasteLearningEnabled,
   oauthEnforced = false,
   cmdZdr = false,
   ossPrimaryProvider = '',
@@ -210,8 +209,10 @@ export function buildCommandCodeHeaders({
     'User-Agent': userAgent || 'cli',
     'x-cli-environment': cliEnvironment || 'production',
     'x-command-code-version': commandCodeVersion,
-    'x-taste-learning': String(Boolean(tasteLearningEnabled)),
   };
+  if (typeof tasteLearningEnabled === 'boolean') {
+    headers['x-taste-learning'] = String(tasteLearningEnabled);
+  }
   // 省略缺失的可选头，避免 undefined 被字符串化成 "undefined" 发给上游。
   if (projectSlug) headers['x-project-slug'] = projectSlug;
   if (sessionId) headers['x-session-id'] = sessionId;
@@ -239,10 +240,11 @@ export async function forwardToCC({
   body,
   apiKey,
   incomingHeaders = {},
+  sessionId: providedSessionId,
   signal,
   getSessionId,
 }) {
-  const sessionId = getSessionId(incomingHeaders, apiKey);
+  const sessionId = providedSessionId || getSessionId(incomingHeaders, apiKey);
   return fetch(`${apiBase}/alpha/generate`, {
     method: 'POST',
     headers: buildCommandCodeHeaders({

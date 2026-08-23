@@ -4,7 +4,7 @@
 
 将 Command Code API 转换为 OpenAI / Anthropic 兼容接口的反代代理。Node.js ESM 实现，零外部依赖。
 
-基于本机 `command-code@1.31.0` CLI bundle 的分析，对齐 Command Code API 请求协议，并实现多层兼容适配。
+基于本机 `command-code@1.32.1` CLI bundle 和真实流量抓包，对齐 Command Code API 请求协议，并实现多层兼容适配。
 
 **完整功能**：Command Code 原生 HTTP/WebSocket 透传 | OpenAI Chat Completions + Anthropic Messages API | 流式/非流式输出 | 工具调用 (tool_use) | 多模态图片输入 | 推理强度 (reasoning_effort) | 动态模型列表 | 缓存命中指标 | 客户端断连检测（上游中止） | 零输出 → 429 自动重试 | 连续超时 → 429 自动重试 | 隐私保护日志
 
@@ -62,7 +62,7 @@ commandcode/
 | `port` | `3050` | 监听端口 |
 | `host` | `0.0.0.0` | 监听地址 |
 | `apiBase` | `https://api.commandcode.ai` | CC API 地址 |
-| `protocolVersion` | `1.31.0` | 请求协议实现基线，同时作为 `x-command-code-version` 头发送 |
+| `protocolVersion` | `1.32.1` | 请求协议实现基线，同时作为 `x-command-code-version` 头发送 |
 | `cliEnvironment` | `production` | `x-cli-environment` 请求头 |
 | `userAgent` | `cli` | CLI 请求 User-Agent |
 | `projectSlug` | `""` (per-session fake slug) | `x-project-slug` header |
@@ -280,14 +280,14 @@ data: {"type":"message_stop"}
 
 ### Command Code 原生透传
 
-代理会在相同路径透传 Command Code 原生 API。`/alpha/*`、`/provider/*` 以及 1.31.0 bundle 声明的 `/beta/*`、`/internal/*` 会被发送到固定的 `apiBase`；其他路径不会转发，因此它不是任意 URL 代理。
+代理会在相同路径透传 Command Code 原生 API。`/alpha/*`、`/provider/*` 以及 1.32.1 bundle 声明的 `/beta/*`、`/internal/*` 会被发送到固定的 `apiBase`；其他路径不会转发，因此它不是任意 URL 代理。
 
 原生接口保留 HTTP method、query、请求体原始字节、认证/OAuth/Cookie 请求头、上游状态码、响应头和响应流。只移除 `Host`、`Connection`、`Transfer-Encoding` 等逐跳头；3xx 响应不会自动跟随。请求体上限仍为 10MB。生产部署建议为原生入口使用专用域名，避免与其他 Web 应用共享 Cookie。
 
 ```bash
 curl http://127.0.0.1:3050/alpha/whoami \
   -H "Authorization: Bearer user_xxxxxxxxx" \
-  -H "x-command-code-version: 1.31.0"
+  -H "x-command-code-version: 1.32.1"
 ```
 
 `POST /alpha/generate` 会返回原生逐行 JSON（NDJSON），不会转换为 OpenAI SSE。沙箱实时通道使用相同路径的 WebSocket 隧道，例如 `ws://127.0.0.1:3050/alpha/sandbox/stream/...`。外部 OAuth、npm 更新、遥测和用户自定义 MCP 地址不属于 Command API origin，不会被这个入口代理。
@@ -402,12 +402,12 @@ claude
 
 ## 反检测
 
-基于对本机 `command-code@1.31.0` bundle 的分析，实现了以下兼容适配：
+基于对本机 `command-code@1.32.1` bundle 和 1.32.1 CLI 实际流量的分析，实现了以下兼容适配：
 
 | 机制 | 实现 |
 |------|------|
 | **按 Key 分 Session** | 每个 API Key 独立 session，12h 过期 + 1h 随机抖动 |
-| **协议基线 / 版本头** | 请求协议与 `x-command-code-version` 都固定为 `1.31.0`（`protocolVersion`）；不再跟随 npm latest，发送的版本号始终与实现一致 |
+| **协议基线 / 版本头** | 请求协议与 `x-command-code-version` 都固定为 `1.32.1`（`protocolVersion`）；不再跟随 npm latest，发送的版本号始终与实现一致 |
 | **CLI 信封格式** | config/memory/taste/skills/permissionMode/mode/params/threadId |
 | **工具与图片格式** | 工具字段、base64 图片和 mimeType 对齐最新版 wire format；tool-result 回填 toolName |
 | **流式续接** | `pause_turn` 最多按同一请求线程继续两次 |
@@ -416,7 +416,7 @@ claude
 | **稳定指纹** | 按 API Key 派生最新版 CLI 所需的指纹字段，重启后保持稳定 |
 | **OpenTelemetry** | `traceparent` (W3C Trace Context) |
 | **环境标识** | `x-cli-environment: production` |
-| **Project Slug** | 自定义 `x-project-slug` |
+| **工作区身份** | 按 API Key 派生稳定 Git 工作区，`workingDir` 与 `x-project-slug` 始终指向同一项目 |
 | **思考强度** | `reasoning_effort` 透传 (low/medium/high/xhigh/max，是否支持取决于模型) |
 | **API Key 格式验证** | 正则 `user_[a-zA-Z0-9_-]+`，自动清理多余路径/前缀，`sk-xxx` 等非 `user_` 格式拒 |
 | **流式超时保护** | 流式 30s、非流式 90s → 429 + SDK 自动重试 |
@@ -432,15 +432,19 @@ claude
 ```json
 {
   "config": {
-    "workingDir": "C:\\project",
+    "workingDir": "C:\\Users\\alex\\projects\\app",
     "date": "2026-06-07",
     "environment": "linux",
-    "structure": [],
-    "isGitRepo": false,
-    "currentBranch": "",
-    "mainBranch": "",
-    "gitStatus": "",
-    "recentCommits": []
+    "structure": ["package.json", "README.md", "src", "tsconfig.json"],
+    "isGitRepo": true,
+    "currentBranch": "feat/streaming",
+    "mainBranch": "main",
+    "gitStatus": "Working tree clean",
+    "recentCommits": [
+      "a1b2c3d fix: handle streaming edge cases",
+      "d4e5f6a feat: add streaming support",
+      "b7c8d9e chore: update dependencies"
+    ]
   },
   "memory": null,
   "taste": null,
@@ -460,7 +464,7 @@ claude
 }
 ```
 
-`threadId` 仅在客户端通过 `x-thread-id` 或 `x-command-code-thread-id` 传入有效 UUID 时发送；否则代理会按最新版 CLI 的可选字段规则省略它。
+客户端未提供有效 `threadId` 时，代理会按 API Key 会话生成 UUID；同一个 UUID 同时作为 `threadId` 和 `x-session-id` 发送，与 1.32.1 CLI 一致。
 
 ### CC API 图片消息格式
 
