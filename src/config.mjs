@@ -43,6 +43,9 @@ export function loadConfig() {
     cmdZdr: false,
     ossPrimaryProvider: '',
     fingerprintSalt: '',
+    // 原生透传抓包记录文件（RECORD_WIRE）：设为 JSONL 文件路径后，
+    // 经过代理的 CLI 请求/响应（认证头脱敏）会逐行追加，用于协议分析。
+    recordWire: '',
     logFile: '',
     logLevel: 'info',
     useProviderModels: true,
@@ -82,6 +85,7 @@ export function loadConfig() {
   if (process.env.CMD_ZDR) defaults.cmdZdr = process.env.CMD_ZDR === 'true';
   if (process.env.OSS_PRIMARY_PROVIDER) defaults.ossPrimaryProvider = process.env.OSS_PRIMARY_PROVIDER;
   if (process.env.FINGERPRINT_SALT) defaults.fingerprintSalt = process.env.FINGERPRINT_SALT;
+  if (process.env.RECORD_WIRE) defaults.recordWire = process.env.RECORD_WIRE;
   if (process.env.LOG_FILE) defaults.logFile = process.env.LOG_FILE;
   if (process.env.LOG_LEVEL) defaults.logLevel = process.env.LOG_LEVEL;
   if (process.env.CC_USE_PROVIDER_MODELS) {

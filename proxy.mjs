@@ -505,6 +505,51 @@ async function writeSse(res, chunk) {
   });
 }
 
+// ── 原生透传抓包记录（RECORD_WIRE）────────────────────
+// 设为 JSONL 文件路径后，经过代理的 CLI 请求/响应会脱敏后逐行追加，
+// 用于配合 COMMANDCODE_API_ENV=local 分析真实 CLI 的 wire 协议。
+let recordStream = null;
+const RECORD_BODY_LIMIT = 64 * 1024;
+const WIRE_REDACTED_HEADERS = new Set(['authorization', 'x-api-key', 'cookie']);
+
+function redactWireHeaders(headers = {}) {
+  const redacted = {};
+  for (const [name, value] of Object.entries(headers)) {
+    redacted[name] = WIRE_REDACTED_HEADERS.has(name.toLowerCase()) ? '***' : value;
+  }
+  return redacted;
+}
+
+function recordNativeWire(event, req, url, body, upstream) {
+  if (!CFG.recordWire) return;
+  try {
+    if (!recordStream) {
+      recordStream = createWriteStream(CFG.recordWire, { flags: 'a' });
+      recordStream.on('error', () => { recordStream = null; });
+    }
+    if (event === 'request') {
+      const bodyText = body ? body.toString('utf8') : '';
+      recordStream.write(JSON.stringify({
+        ts: new Date().toISOString(),
+        event,
+        method: req.method,
+        path: `${url.pathname}${url.search}`,
+        headers: redactWireHeaders(req.headers),
+        body: bodyText.length > RECORD_BODY_LIMIT
+          ? bodyText.slice(0, RECORD_BODY_LIMIT) + '…(truncated)'
+          : bodyText,
+      }) + '\n');
+    } else if (event === 'response' && upstream) {
+      recordStream.write(JSON.stringify({
+        ts: new Date().toISOString(),
+        event,
+        status: upstream.statusCode,
+        headers: redactWireHeaders(upstream.headers),
+      }) + '\n');
+    }
+  } catch {}
+}
+
 async function handleNativeCommandCode(req, res, url) {
   if (!NATIVE_METHODS.has(req.method)) {
     res.setHeader('Allow', [...NATIVE_METHODS].join(', '));
@@ -527,6 +572,8 @@ async function handleNativeCommandCode(req, res, url) {
     return;
   }
 
+  recordNativeWire('request', req, url, body);
+
   const abortController = new AbortController();
   req.once('aborted', () => abortController.abort());
   res.once('close', () => {
@@ -543,6 +590,7 @@ async function handleNativeCommandCode(req, res, url) {
       signal: abortController.signal,
       idleTimeoutMs: NATIVE_IDLE_TIMEOUT_MS,
     });
+    recordNativeWire('response', req, url, body, upstream);
     const responseHeaders = filterProxyHeaders(upstream.headers);
     for (const [name, value] of Object.entries(responseHeaders)) {
       if (value !== undefined) res.setHeader(name, value);

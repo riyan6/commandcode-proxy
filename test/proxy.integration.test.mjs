@@ -4,10 +4,12 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
+import { readFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const wireRecordPath = resolve(projectRoot, 'test', '.wire-record-test.jsonl');
 let upstream;
 let proxyProcess;
 let proxyUrl;
@@ -55,6 +57,7 @@ async function waitForHealth(url) {
 }
 
 before(async () => {
+  try { unlinkSync(wireRecordPath); } catch {}
   upstream = createServer(async (req, res) => {
     const bodyText = await readRequestBody(req);
     res.setHeader('Content-Type', 'application/json');
@@ -248,6 +251,8 @@ before(async () => {
       CC_INIT_RETRY_MS: '1',
       // 原生透传空闲超时缩短到 50ms，便于测试上游挂起场景。
       CC_NATIVE_IDLE_TIMEOUT_MS: '50',
+      // 开启抓包记录，验证 RECORD_WIRE 脱敏行为。
+      RECORD_WIRE: wireRecordPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -263,6 +268,7 @@ after(async () => {
     await once(proxyProcess, 'exit');
   }
   if (upstream) await new Promise(resolveClose => upstream.close(resolveClose));
+  try { unlinkSync(wireRecordPath); } catch {}
 });
 
 test('健康检查和认证错误返回正确状态', async () => {
@@ -1019,4 +1025,24 @@ test('仪表盘页面可直接访问且不包含数据', async () => {
   assert.match(response.headers.get('content-type'), /text\/html/);
   const html = await response.text();
   assert.match(html, /\/stats/);
+});
+
+test('RECORD_WIRE 将原生透传请求脱敏后逐行记录到文件', async () => {
+  await fetch(`${proxyUrl}/alpha/native-test?mode=record`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer user_wire_record', 'Content-Type': 'application/json' },
+    body: '{"probe":"wire-record"}',
+  });
+  // 异步写入流需要短暂时间落盘。
+  await new Promise(resolveDelay => setTimeout(resolveDelay, 300));
+
+  const lines = readFileSync(wireRecordPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const requestEntry = lines.find(entry => entry.event === 'request' && entry.path === '/alpha/native-test?mode=record');
+  assert.ok(requestEntry, '应记录 native 请求');
+  assert.equal(requestEntry.method, 'POST');
+  // 认证头必须脱敏，不得把完整 Key 写入文件。
+  assert.equal(requestEntry.headers.authorization, '***');
+  assert.equal(requestEntry.body, '{"probe":"wire-record"}');
+  const responseEntry = lines.find(entry => entry.event === 'response' && entry.status === 207);
+  assert.ok(responseEntry, '应记录上游响应状态');
 });

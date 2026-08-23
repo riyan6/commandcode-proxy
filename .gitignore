@@ -9,3 +9,4 @@ stdout.txt
 stderr.txt
 captured-requests/
 
+test/.wire-record-test.jsonl

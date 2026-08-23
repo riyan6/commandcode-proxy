@@ -72,6 +72,7 @@ commandcode/
 | `oauthEnforced` | `false` | Legacy `x-co-flag` switch (removed in 1.31.0; kept for config compatibility) |
 | `cmdZdr` | `false` | Send `x-cmd-zdr: 1` when enabled |
 | `fingerprintSalt` | `""` | Salt for stable per-key fingerprint derivation |
+| `recordWire` | `""` | Wire capture file for native pass-through (JSONL, auth headers redacted); run the real CLI with `COMMANDCODE_API_ENV=local` through the proxy to analyze its protocol |
 | `logFile` | `""` | Log file path (empty = console only) |
 | `logLevel` | `info` | Log level |
 | `useProviderModels` | `true` | Return the official Provider API model list; `false` returns an error |

@@ -72,6 +72,7 @@ commandcode/
 | `oauthEnforced` | `false` | 旧版 `x-co-flag` 开关（1.31.0 已移除该头，保留配置仅为兼容） |
 | `cmdZdr` | `false` | 是否发送 `x-cmd-zdr: 1` |
 | `fingerprintSalt` | `""` | 指纹派生盐，生产环境建议通过环境变量设置 |
+| `recordWire` | `""` | 原生透传抓包记录文件（JSONL，认证头脱敏）；配合 `COMMANDCODE_API_ENV=local` 运行真实 CLI 可分析其 wire 协议 |
 | `logFile` | `""` | 日志文件路径（空=仅控制台） |
 | `logLevel` | `info` | 日志级别 |
 | `useProviderModels` | `true` | 返回官方 Provider API 模型列表，设为 `false` 时返回错误 |
