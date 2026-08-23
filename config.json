@@ -6,7 +6,7 @@
   "protocolVersion": "1.31.0",
   "cliEnvironment": "production",
   "userAgent": "cli",
-  "projectSlug": "cc-proxy",
+  "projectSlug": "",
   "mode": "agent",
   "permissionMode": "standard",
   "tasteLearningEnabled": false,

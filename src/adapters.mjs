@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { readWithTimeout } from './stream.mjs';
 
 // 请求适配器：负责 OpenAI、Anthropic 与 Command Code 之间的纯数据转换。
 
@@ -22,6 +23,21 @@ function tryParseJSON(value) {
 function isUuid(value) {
   return typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+// 将 Anthropic 的 image 块（source 结构）转换为 OpenAI 的 image_url 格式，
+// 否则图片会在协议转换中被静默丢弃，导致 vision 请求退化为纯文本。
+function anthropicImageToOpenAI(block) {
+  const source = block.source;
+  if (!source || typeof source !== 'object') return null;
+  if (source.type === 'base64') {
+    const mediaType = source.media_type || 'image/png';
+    return { type: 'image_url', image_url: { url: `data:${mediaType};base64,${source.data || ''}` } };
+  }
+  if (source.type === 'url' && source.url) {
+    return { type: 'image_url', image_url: { url: source.url } };
+  }
+  return null;
 }
 
 function textFromContent(content) {
@@ -313,8 +329,10 @@ export function mapAnthropicStopReason(finishReason) {
   }
 }
 
-export function buildAnthropicResponse(model, fullText, toolCalls, finishReason, usage) {
+export function buildAnthropicResponse(model, fullText, toolCalls, finishReason, usage, thinkingText = '') {
   const content = [];
+  // 推理模型的思考内容放在最前，与流式路径的 thinking block 行为保持一致。
+  if (thinkingText) content.push({ type: 'thinking', thinking: thinkingText });
   if (fullText) content.push({ type: 'text', text: fullText });
   if (toolCalls) {
     for (const toolCall of toolCalls) {
@@ -410,12 +428,17 @@ export function convertAnthropicToOpenAI(anthropicReq) {
     } else if (message.role === 'user') {
       let textContent = '';
       const toolResults = [];
+      const imageParts = [];
       if (typeof message.content === 'string') {
         textContent = message.content;
       } else if (Array.isArray(message.content)) {
         for (const block of message.content) {
           if (block.type === 'text') textContent += block.text || '';
           else if (block.type === 'tool_result') toolResults.push(block);
+          else if (block.type === 'image') {
+            const imagePart = anthropicImageToOpenAI(block);
+            if (imagePart) imageParts.push(imagePart);
+          }
         }
       }
       // 1.31.0 的 toWireMessages：同一 user 消息内的 tool_result 转成 tool 消息放在文本前面。
@@ -432,7 +455,14 @@ export function convertAnthropicToOpenAI(anthropicReq) {
           content: toolContent,
         });
       }
-      if (textContent) openaiMessages.push({ role: 'user', content: textContent });
+      // 含图片时输出数组内容（text + image_url），下游 buildWireMessages 会转成 wire image 部分。
+      if (imageParts.length > 0) {
+        const content = [];
+        if (textContent) content.push({ type: 'text', text: textContent });
+        openaiMessages.push({ role: 'user', content: content.concat(imageParts) });
+      } else if (textContent) {
+        openaiMessages.push({ role: 'user', content: textContent });
+      }
     } else if (message.role === 'tool') {
       // 兼容部分客户端直接发送独立 tool 消息（非标准 Anthropic 但存在）。
       const toolContent = typeof message.content === 'string'
@@ -580,12 +610,7 @@ export async function* createAnthropicSseTranslator(response, model, messageId, 
 
   try {
     while (true) {
-      const result = await Promise.race([
-        reader.read(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('STREAM_IDLE_TIMEOUT')), streamIdleTimeoutMs)
-        ),
-      ]);
+      const result = await readWithTimeout(reader, streamIdleTimeoutMs);
       const { done, value } = result;
       if (done) {
         buffer += decoder.decode();

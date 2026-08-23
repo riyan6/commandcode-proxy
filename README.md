@@ -65,7 +65,7 @@ commandcode/
 | `protocolVersion` | `1.31.0` | Protocol implementation baseline; also sent as the `x-command-code-version` header |
 | `cliEnvironment` | `production` | `x-cli-environment` header |
 | `userAgent` | `cli` | CLI User-Agent |
-| `projectSlug` | `cc-proxy` | `x-project-slug` header |
+| `projectSlug` | `""` (per-session fake slug) | `x-project-slug` header |
 | `mode` | `agent` | CC CLI request mode (`agent`, `learning`, `custom-agent`, `custom-agent-create`, `title-gen`, `tool-desc`, `compact`, or `vision`) |
 | `permissionMode` | `standard` | CC permission mode |
 | `tasteLearningEnabled` | `false` | `x-taste-learning` switch |

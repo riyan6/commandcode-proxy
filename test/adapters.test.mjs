@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCcRequest, normalizeUsage, getCacheReadTokens, convertAnthropicToOpenAI } from '../src/adapters.mjs';
+import { buildAnthropicResponse, buildCcRequest, normalizeUsage, getCacheReadTokens, convertAnthropicToOpenAI } from '../src/adapters.mjs';
 
 test('请求体与 command-code 1.31.0 的 CLI 信封和工具格式一致', () => {
   const body = buildCcRequest({
@@ -203,4 +203,73 @@ test('Claude Code 发送 role:system 消息时合并到 params.system', () => {
   assert.equal(cc.params.system, '顶层系统提示\n消息里的系统提示');
   // 系统提示不进 wire messages。
   assert.deepEqual(cc.params.messages.map(m => m.role), ['user']);
+});
+
+test('Anthropic base64 图片块转换为 CC wire image，不再被丢弃', () => {
+  const openai = convertAnthropicToOpenAI({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1000,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: '这张图里有什么' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } },
+      ],
+    }],
+  });
+
+  // user 消息保留为 text + image_url 数组内容。
+  const userMessage = openai.messages.find(m => m.role === 'user');
+  assert.ok(Array.isArray(userMessage.content));
+  assert.equal(userMessage.content[0].type, 'text');
+  assert.equal(userMessage.content[0].text, '这张图里有什么');
+  assert.equal(userMessage.content[1].type, 'image_url');
+  assert.equal(userMessage.content[1].image_url.url, 'data:image/jpeg;base64,QUJD');
+
+  // 再经 buildCcRequest 转成 wire image 部分（带 mimeType）。
+  const cc = buildCcRequest(openai, { mode: 'agent', permissionMode: 'standard' });
+  const wire = cc.params.messages[0].content;
+  assert.equal(wire[0].type, 'text');
+  assert.equal(wire[1].type, 'image');
+  assert.equal(wire[1].image, 'data:image/jpeg;base64,QUJD');
+  assert.equal(wire[1].mimeType, 'image/jpeg');
+});
+
+test('Anthropic URL 图片块转换为 image_url 格式', () => {
+  const openai = convertAnthropicToOpenAI({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1000,
+    messages: [{
+      role: 'user',
+      content: [{ type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }],
+    }],
+  });
+
+  const userMessage = openai.messages.find(m => m.role === 'user');
+  assert.ok(Array.isArray(userMessage.content));
+  assert.equal(userMessage.content[0].type, 'image_url');
+  assert.equal(userMessage.content[0].image_url.url, 'https://example.com/a.png');
+});
+
+test('非流式 Anthropic 响应包含 thinking block', () => {
+  const body = buildAnthropicResponse(
+    'claude-sonnet-4-6',
+    '最终回答',
+    null,
+    'stop',
+    { inputTokens: 1, outputTokens: 2 },
+    '思考过程',
+  );
+
+  // thinking 块在最前，与流式路径的块顺序一致。
+  assert.equal(body.content[0].type, 'thinking');
+  assert.equal(body.content[0].thinking, '思考过程');
+  assert.equal(body.content[1].type, 'text');
+  assert.equal(body.content[1].text, '最终回答');
+  assert.equal(body.stop_reason, 'end_turn');
+  assert.equal(body.usage.output_tokens, 2);
+
+  // 无 thinking 时不输出 thinking 块。
+  const noThinking = buildAnthropicResponse('claude-sonnet-4-6', '回答', null, 'stop', { inputTokens: 1, outputTokens: 1 });
+  assert.equal(noThinking.content[0].type, 'text');
 });

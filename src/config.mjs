@@ -33,7 +33,9 @@ export function loadConfig() {
     protocolVersion: '1.31.0',
     cliEnvironment: 'production',
     userAgent: 'cli',
-    projectSlug: 'cc-proxy',
+    // 默认留空：由 forwardToCC 按会话生成伪 project slug，
+    // 避免所有请求带同一个固定值（如 "cc-proxy"）被上游聚类识别。
+    projectSlug: '',
     mode: 'agent',
     permissionMode: 'standard',
     tasteLearningEnabled: false,

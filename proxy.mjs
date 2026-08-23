@@ -4,14 +4,16 @@
  */
 import http from 'http';
 import { randomUUID } from 'crypto';
-import { appendFileSync } from 'fs';
+import { createWriteStream } from 'fs';
 import { pipeline } from 'stream/promises';
 import { loadConfig } from './src/config.mjs';
 import { createStateStore } from './src/state.mjs';
 import { generateFingerprint } from './src/fingerprint.mjs';
 import { validateAnthropicRequest, validateOpenAIRequest } from './src/validation.mjs';
+import { readWithTimeout } from './src/stream.mjs';
 import {
   buildCommandCodeHeaders,
+  fakeProjectSlug,
   filterProxyHeaders,
   forwardNativeToCC,
   forwardToCC,
@@ -38,6 +40,11 @@ const CC_VERSION = CFG.protocolVersion;
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB — 请求体大小上限
 const STREAM_IDLE_TIMEOUT_MS = 30000;   // 30s — 流式无新数据中断
 const NONSTREAM_IDLE_TIMEOUT_MS = 90000; // 90s — 非流式超时更宽容
+// 原生透传的空闲超时（可用 CC_NATIVE_IDLE_TIMEOUT_MS 覆盖，便于测试与运维调整）。
+const NATIVE_IDLE_TIMEOUT_ENV = Number.parseInt(process.env.CC_NATIVE_IDLE_TIMEOUT_MS || '', 10);
+const NATIVE_IDLE_TIMEOUT_MS = Number.isFinite(NATIVE_IDLE_TIMEOUT_ENV) && NATIVE_IDLE_TIMEOUT_ENV > 0
+  ? NATIVE_IDLE_TIMEOUT_ENV
+  : 120000; // 120s — 透传内容形态未知，比生成路径更宽容
 const NATIVE_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']);
 
 // 连续 3 次超时才提醒压缩上下文，计数按 API Key 隔离。
@@ -46,13 +53,23 @@ const TIMEOUT_REDUCE_CONTEXT_THRESHOLD = 3;
 // ── 日志 ─────────────────────────────────────────────
 const LOG_LEVEL_ORDER = { debug: 10, info: 20, warn: 30, error: 40 };
 
+// 日志文件用异步追加流写入，避免每条日志的同步 IO 阻塞事件循环；打开失败时降级为仅控制台。
+let logStream = null;
+function appendLogFile(line) {
+  if (!logStream) {
+    logStream = createWriteStream(CFG.logFile, { flags: 'a' });
+    logStream.on('error', () => { logStream = null; });
+  }
+  logStream.write(line + '\n');
+}
+
 function log(level, msg, data) {
   const configuredLevel = LOG_LEVEL_ORDER[CFG.logLevel] ?? LOG_LEVEL_ORDER.info;
   if ((LOG_LEVEL_ORDER[level] ?? LOG_LEVEL_ORDER.info) < configuredLevel) return;
   const line = `[${new Date().toISOString()}] [${level}] ${msg}${data ? ' ' + JSON.stringify(data) : ''}`;
   console.log(line);
   if (CFG.logFile) {
-    try { appendFileSync(CFG.logFile, line + '\n', 'utf-8'); } catch {}
+    try { appendLogFile(line); } catch {}
   }
 }
 
@@ -72,46 +89,63 @@ function getTimeoutMessage(apiKey) {
 // ── 初始化预请求（fingerprint，首次 + 每 8h+2h 抖动） ────
 const INIT_REFRESH_MS = 8 * 60 * 60 * 1000;    // 8h
 const INIT_JITTER_MS  = 2 * 60 * 60 * 1000;    // 2h 抖动
+// 上报失败后的短退避（可用 CC_INIT_RETRY_MS 覆盖，便于测试与运维调整），
+// 不能沿用完整的 8h 周期，否则一次失败会让该 key 一整天不再上报指纹。
+const INIT_RETRY_MS_ENV = Number.parseInt(process.env.CC_INIT_RETRY_MS || '', 10);
+const INIT_RETRY_MS = Number.isFinite(INIT_RETRY_MS_ENV) && INIT_RETRY_MS_ENV > 0
+  ? INIT_RETRY_MS_ENV
+  : 5 * 60 * 1000;
 
 async function ensureInitialized(apiKey, signal, incomingHeaders = {}) {
   const keyState = state.getOrCreateKeyState(apiKey);
   const now = Date.now();
   if (now < keyState.nextInitAt) return;
 
-  try {
-    // 指纹和生成请求使用同一会话标识及公共 CLI 请求头。
-    // 1.31.0 已移除 /alpha/lifecycle-events 端点（改为 telemetry 内部事件），
-    // 这里只保留 fingerprint/record 初始化。
-    const sessionId = state.getSessionId(incomingHeaders, apiKey);
-    const headers = buildCommandCodeHeaders({
-      apiKey,
-      commandCodeVersion: CC_VERSION,
-      cliEnvironment: CFG.cliEnvironment,
-      userAgent: CFG.userAgent,
-      projectSlug: CFG.projectSlug,
-      sessionId,
-      traceparent: generateTraceparent(),
-      tasteLearningEnabled: CFG.tasteLearningEnabled,
-      oauthEnforced: CFG.oauthEnforced,
-      cmdZdr: CFG.cmdZdr,
-      ossPrimaryProvider: CFG.ossPrimaryProvider,
-    });
-    const fingerprint = keyState.fingerprint || {};
+  // 并发首请求共用同一次上报，避免重复调用 fingerprint/record。
+  if (keyState.initInFlight) return keyState.initInFlight;
+  keyState.initInFlight = (async () => {
+    try {
+      // 指纹和生成请求使用同一会话标识、同一 project slug 规则及公共 CLI 请求头。
+      // 1.31.0 已移除 /alpha/lifecycle-events 端点（改为 telemetry 内部事件），
+      // 这里只保留 fingerprint/record 初始化。
+      const sessionId = state.getSessionId(incomingHeaders, apiKey);
+      const headers = buildCommandCodeHeaders({
+        apiKey,
+        commandCodeVersion: CC_VERSION,
+        cliEnvironment: CFG.cliEnvironment,
+        userAgent: CFG.userAgent,
+        projectSlug: CFG.projectSlug || fakeProjectSlug(sessionId),
+        sessionId,
+        traceparent: generateTraceparent(),
+        tasteLearningEnabled: CFG.tasteLearningEnabled,
+        oauthEnforced: CFG.oauthEnforced,
+        cmdZdr: CFG.cmdZdr,
+        ossPrimaryProvider: CFG.ossPrimaryProvider,
+      });
+      const fingerprint = keyState.fingerprint || {};
 
-    const response = await fetch(`${CFG.apiBase}/alpha/fingerprint/record`, {
-      method: 'POST', headers, signal,
-      body: JSON.stringify(fingerprint),
-    });
-    if (!response.ok) log('warn', 'Fingerprint record failed', { status: response.status });
-    else log('info', 'Fingerprint recorded');
+      const response = await fetch(`${CFG.apiBase}/alpha/fingerprint/record`, {
+        method: 'POST', headers, signal,
+        body: JSON.stringify(fingerprint),
+      });
+      if (!response.ok) {
+        // 上报失败走 5 分钟短退避，下一个请求即重试，而不是静默等 8 小时。
+        keyState.nextInitAt = Date.now() + INIT_RETRY_MS;
+        log('warn', 'Fingerprint record failed, will retry soon', { status: response.status });
+        return;
+      }
+      log('info', 'Fingerprint recorded');
 
-    // 成功：8h + 2h 随机抖动
-    const jitter = Math.floor(Math.random() * INIT_JITTER_MS);
-    keyState.nextInitAt = Date.now() + INIT_REFRESH_MS + jitter;
-    log('info', 'Fingerprint next refresh', { nextIn: `${(INIT_REFRESH_MS + jitter) / 3600000}h` });
-  } catch (e) {
-    if (e.name !== 'AbortError') log('warn', 'Fingerprint refresh error, will retry next request', { error: e.message });
-  }
+      // 成功：8h + 2h 随机抖动
+      const jitter = Math.floor(Math.random() * INIT_JITTER_MS);
+      keyState.nextInitAt = Date.now() + INIT_REFRESH_MS + jitter;
+      log('info', 'Fingerprint next refresh', { nextIn: `${(INIT_REFRESH_MS + jitter) / 3600000}h` });
+    } catch (e) {
+      if (e.name !== 'AbortError') log('warn', 'Fingerprint refresh error, will retry next request', { error: e.message });
+    }
+  })();
+  keyState.initInFlight.finally(() => { keyState.initInFlight = null; }).catch(() => {});
+  return keyState.initInFlight;
 }
 
 // ── 工具函数 ───────────────────────────────────────
@@ -296,7 +330,7 @@ function createSseTranslator(model, completionId, created) {
           break;
         }
 
-        case 'reasoning-end': case 'provider-metadata': case 'tool-input-start': case 'tool-input-delta': case 'tool-input-end': case 'tool-error': case 'text-end':
+        case 'reasoning-start': case 'reasoning-end': case 'provider-metadata': case 'tool-input-start': case 'tool-input-delta': case 'tool-input-end': case 'tool-error': case 'text-end':
           // Silent - no user-visible content
           break;
         default:
@@ -340,7 +374,7 @@ const CC_STATUS_MAP = {
   503: { status: 503, type: 'temporarily_unavailable' },
 };
 
-function mapCcError(ccStatus, ccBody) {
+function mapCcError(ccStatus, ccBody, retryAfterHeader) {
   const mapped = CC_STATUS_MAP[ccStatus] || { status: 502, type: 'upstream_error' };
   let message = `CC API error (${ccStatus})`;
 
@@ -353,13 +387,15 @@ function mapCcError(ccStatus, ccBody) {
     }
   }
 
-  // CC 429 响应可能带 retry-after
+  // CC 429 响应可能带 retry-after：优先透传上游返回的值，无值时再回退默认 30s。
   if (ccStatus === 429) {
+    const parsedRetryAfter = Number.parseInt(retryAfterHeader ?? '', 10);
+    const retryAfter = Number.isFinite(parsedRetryAfter) && parsedRetryAfter >= 0 ? parsedRetryAfter : 30;
     return {
       status: 429,
       body: {
         error: { message, type: 'rate_limit_error' },
-        retry_after: 30,
+        retry_after: retryAfter,
       },
     };
   }
@@ -371,21 +407,38 @@ function mapCcError(ccStatus, ccBody) {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
+    // 优先按声明的 Content-Length 预检，超限直接拒绝，客户端不必继续发送。
+    const declaredSize = Number.parseInt(req.headers['content-length'] || '0', 10);
+    if (Number.isFinite(declaredSize) && declaredSize > MAX_BODY_SIZE) {
+      const error = new Error('Request body exceeds 10MB limit');
+      error.status = 413;
+      req.resume();
+      reject(error);
+      return;
+    }
+
     const chunks = [];
     let totalSize = 0;
+    let rejected = false;
     req.on('data', c => {
+      if (rejected) return;
       totalSize += c.length;
       if (totalSize > MAX_BODY_SIZE) {
-        req.destroy(new Error('Request body too large'));
-        reject(new Error('Request body exceeds 10MB limit'));
+        // 不立即 destroy 连接：先让调用方回 413，连接由调用方按 Connection: close 处理。
+        rejected = true;
+        const error = new Error('Request body exceeds 10MB limit');
+        error.status = 413;
+        reject(error);
+        return;
       }
       chunks.push(c);
     });
     req.on('end', () => {
+      if (rejected) return;
       try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
       catch { reject(new Error('Invalid JSON')); }
     });
-    req.on('error', reject);
+    req.on('error', error => { if (!rejected) reject(error); });
   });
 }
 
@@ -431,6 +484,21 @@ function sendJSON(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+// SSE 写入带背压：res.write 返回 false 说明内核写缓冲已满，
+// 等待 drain（或连接关闭）再继续，防止慢客户端 + 长流把内存无限积压在写队列里。
+async function writeSse(res, chunk) {
+  if (res.writableEnded || res.destroyed) return;
+  let writable;
+  try { writable = res.write(chunk); } catch { return; }
+  if (writable) return;
+  await new Promise(resolve => {
+    const onDrain = () => { res.removeListener('close', onClose); resolve(); };
+    const onClose = () => { res.removeListener('drain', onDrain); resolve(); };
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+  });
+}
+
 async function handleNativeCommandCode(req, res, url) {
   if (!NATIVE_METHODS.has(req.method)) {
     res.setHeader('Allow', [...NATIVE_METHODS].join(', '));
@@ -467,6 +535,7 @@ async function handleNativeCommandCode(req, res, url) {
       headers: req.headers,
       body,
       signal: abortController.signal,
+      idleTimeoutMs: NATIVE_IDLE_TIMEOUT_MS,
     });
     const responseHeaders = filterProxyHeaders(upstream.headers);
     for (const [name, value] of Object.entries(responseHeaders)) {
@@ -528,8 +597,15 @@ async function handleChatCompletions(req, res) {
   let openaiReq;
   try {
     openaiReq = await readBody(req);
-  } catch {
-    sendJSON(res, 400, { error: { message: 'Invalid JSON body', type: 'invalid_request_error' } });
+  } catch (error) {
+    if (error.status === 413) {
+      // 超限后不再允许客户端继续占用连接发送数据，响应写完就主动断开。
+      res.setHeader('Connection', 'close');
+      res.once('finish', () => req.destroy());
+    }
+    sendJSON(res, error.status === 413 ? 413 : 400, {
+      error: { message: error.status === 413 ? error.message : 'Invalid JSON body', type: 'invalid_request_error' },
+    });
     return;
   }
 
@@ -575,6 +651,14 @@ async function handleChatCompletions(req, res) {
   const abortController = new AbortController();
   let aborted = false;
   let partialOutputLength = 0;
+  // 以下统计变量提升到 try 外声明：外层 catch 的日志分支会引用它们，
+  // 若声明在 try 块内，catch 中访问会抛 ReferenceError 并破坏错误响应。
+  let reader = null;
+  let translator = null;
+  const startTime = Date.now();
+  let bytesReceived = 0;
+  let lastCcEvent = '';
+  let keepaliveCount = 0;
 
   try {
     // 首次初始化（fingerprint）
@@ -601,14 +685,10 @@ async function handleChatCompletions(req, res) {
     if (!ccResponse.ok) {
       const errorText = await ccResponse.text().catch(() => '');
       log('error', 'CC API error', { status: ccResponse.status });
-      const mapped = mapCcError(ccResponse.status, errorText);
+      const mapped = mapCcError(ccResponse.status, errorText, ccResponse.headers.get('retry-after'));
       sendJSON(res, mapped.status, mapped.body);
       return;
     }
-
-    let reader = null;
-    let translator = null;
-    const startTime = Date.now(); let bytesReceived = 0; let lastCcEvent = ''; let keepaliveCount = 0;
 
     // 下游断连检测：打断 CC 上游 + 记录日志
     res.on('close', () => {
@@ -651,6 +731,18 @@ async function handleChatCompletions(req, res) {
       translator = createSseTranslator(model, completionId, created);
       let started = false; // 延迟写 200 header，超时/output=0 时返回 JSON 429/502 让 SDK 自动重试
       let continuationCount = 0;
+      // 统一的 SSE 响应头写入点：主循环、尾行解析、结尾 flush 共用，
+      // 避免某条路径只置标志不写头，导致客户端收到无 Content-Type 的 chunked 响应。
+      const ensureStarted = () => {
+        if (started) return;
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        started = true;
+      };
 
       try {
         while (!aborted) {
@@ -659,12 +751,7 @@ async function handleChatCompletions(req, res) {
           reader = ccResponse.body.getReader();
 
           while (true) {
-            const result = await Promise.race([
-              reader.read(),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('STREAM_IDLE_TIMEOUT')), STREAM_IDLE_TIMEOUT_MS)
-              ),
-            ]);
+            const result = await readWithTimeout(reader, STREAM_IDLE_TIMEOUT_MS);
             const { done, value } = result;
             if (done) {
               buffer += decoder.decode();
@@ -681,29 +768,21 @@ async function handleChatCompletions(req, res) {
             for (const line of lines) {
               const events = translator.parseLine(line);
               if (events) {
-                if (!started) {
-                  res.writeHead(200, {
-                    'Content-Type': 'text/event-stream',
-                    'Cache-Control': 'no-cache',
-                    'Connection': 'keep-alive',
-                    'X-Accel-Buffering': 'no',
-                  });
-                  started = true;
-                }
-                for (const evt of events) res.write(evt);
+                ensureStarted();
+                for (const evt of events) await writeSse(res, evt);
                 hadOutput = true;
               }
               if (translator.lastCcEvent) lastCcEvent = translator.lastCcEvent;
             }
             // 静默事件期间发 keepalive，防止客户端超时断开。
-            if (started && !hadOutput) { try { res.write(': keepalive\n\n'); keepaliveCount++; } catch {} }
+            if (started && !hadOutput) { await writeSse(res, ': keepalive\n\n'); keepaliveCount++; }
           }
 
           if (buffer.trim()) {
             const events = translator.parseLine(buffer);
             if (events) {
-              if (!started) started = true;
-              for (const evt of events) res.write(evt);
+              ensureStarted();
+              for (const evt of events) await writeSse(res, evt);
             }
           }
 
@@ -733,18 +812,10 @@ async function handleChatCompletions(req, res) {
               sendJSON(res, 429, { error: { message: 'Empty response from upstream (zero output tokens)', type: 'rate_limit_error' }, retry_after: 10 });
               return;
             }
-            try { res.write(`data: ${JSON.stringify({ error: { message: 'Empty response from upstream (zero output tokens)', type: 'rate_limit_error' }, retry_after: 10 })}\n\n`); } catch {}
+            await writeSse(res, `data: ${JSON.stringify({ error: { message: 'Empty response from upstream (zero output tokens)', type: 'rate_limit_error' }, retry_after: 10 })}\n\n`);
           } else {
-            if (!started) {
-              res.writeHead(200, {
-                'Content-Type': 'text/event-stream',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no',
-              });
-              started = true;
-            }
-            res.write(translator.getDoneEvent());
+            ensureStarted();
+            await writeSse(res, translator.getDoneEvent());
           }
         }
       } catch (e) {
@@ -796,6 +867,7 @@ async function handleChatCompletions(req, res) {
       let reasoningContent = '';
       let finishReason = 'stop';
       let usage = null;
+      let stepUsage = null;
       let toolCalls = null;
       let sawFinish = false;
       let shouldContinue = false;
@@ -831,6 +903,11 @@ async function handleChatCompletions(req, res) {
                   },
                 });
                 break;
+              case 'finish-step':
+                lastCcEvent = event.type;
+                // finish 事件缺 totalUsage 时回退使用 step 级 usage，避免有正文却误判零输出。
+                if (event.usage && !stepUsage) stepUsage = event.usage;
+                break;
               case 'finish':
                 lastCcEvent = event.type;
                 if (String(event.rawFinishReason || event.finishReason || '').toLowerCase() === 'pause_turn') {
@@ -858,7 +935,7 @@ async function handleChatCompletions(req, res) {
                 // abort 是合法终止，不算零输出；有文本时避免触发零输出防护。
                 if (fullText && !usage) usage = { inputTokens: 0, outputTokens: 1 };
                 break;
-              case 'reasoning-end': case 'provider-metadata': case 'tool-input-start': case 'tool-input-delta': case 'tool-input-end': case 'tool-error': case 'text-end':
+              case 'reasoning-start': case 'reasoning-end': case 'provider-metadata': case 'tool-input-start': case 'tool-input-delta': case 'tool-input-end': case 'tool-error': case 'text-end':
                 // Silent - no user-visible content
                 break;
               default:
@@ -874,12 +951,7 @@ async function handleChatCompletions(req, res) {
         const decoder = new TextDecoder();
         reader = ccResponse.body.getReader();
         while (true) {
-          const result = await Promise.race([
-            reader.read(),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('STREAM_IDLE_TIMEOUT')), NONSTREAM_IDLE_TIMEOUT_MS)
-            ),
-          ]);
+          const result = await readWithTimeout(reader, NONSTREAM_IDLE_TIMEOUT_MS);
           const { done, value } = result;
           if (done) {
             buf += decoder.decode();
@@ -910,6 +982,8 @@ async function handleChatCompletions(req, res) {
 
       if (streamError) throw new Error('Upstream stream reported an error');
       if (!sawFinish) throw new Error('Upstream stream ended without finish event');
+      // finish 事件未带 totalUsage 时回退到 step 级 usage，避免有正文却按零输出处理。
+      if (!usage && stepUsage) usage = stepUsage;
       partialOutputLength = fullText.length;
 
       // 输出 token 为 0 时记为错误，避免下游异常计费
@@ -993,8 +1067,13 @@ async function handleMessages(req, res) {
   let anthropicReq;
   try {
     anthropicReq = await readBody(req);
-  } catch {
-    sendAnthropicError(res, 400, 'invalid_request_error', 'Invalid JSON body');
+  } catch (error) {
+    if (error.status === 413) {
+      res.setHeader('Connection', 'close');
+      res.once('finish', () => req.destroy());
+    }
+    sendAnthropicError(res, error.status === 413 ? 413 : 400, 'invalid_request_error',
+      error.status === 413 ? error.message : 'Invalid JSON body');
     return;
   }
 
@@ -1046,9 +1125,14 @@ async function handleMessages(req, res) {
   const abortController = new AbortController();
   let aborted = false;
   let partialOutputLength = 0;
+  // 同 handleChatCompletions：统计变量提升到 try 外声明，供外层 catch 分支引用。
+  let reader = null;
+  const startTime = Date.now();
+  let messageId = '';
+  let bytesReceived = 0;
+  let lastCcEvent = '';
 
   try {
-    let reader = null;
     // 首次初始化（fingerprint）
     await ensureInitialized(apiKey, abortController.signal, req.headers);
     const forwardRequest = () => forwardToCC({
@@ -1072,12 +1156,10 @@ async function handleMessages(req, res) {
     if (!ccResponse.ok) {
       const errorText = await ccResponse.text().catch(() => '');
       log('error', 'CC API error (Anthropic)', { status: ccResponse.status });
-      const mapped = mapCcError(ccResponse.status, errorText);
+      const mapped = mapCcError(ccResponse.status, errorText, ccResponse.headers.get('retry-after'));
       sendAnthropicError(res, mapped.status, mapped.body.error.type, mapped.body.error.message);
       return;
     }
-    const startTime = Date.now();
-    let messageId = '';
 
     // 下游断连检测：打断 CC 上游 + 记录日志
     res.on('close', () => {
@@ -1111,6 +1193,18 @@ async function handleMessages(req, res) {
 
       let ctx;
       let continuationCount = 0;
+      let pingTimer = null;
+      // Anthropic 协议标准的 ping 事件作为 keepalive，
+      // 避免工具输入等长静默期没有任何字节导致客户端超时断开。
+      const startPing = () => {
+        if (pingTimer) return;
+        pingTimer = setInterval(() => {
+          if (!res.writableEnded) {
+            try { res.write('event: ping\ndata: {"type":"ping"}\n\n'); } catch {}
+          }
+        }, 15000);
+        pingTimer.unref?.();
+      };
       try {
         messageId = 'msg_' + randomUUID().slice(0, 12);
         ctx = {
@@ -1131,8 +1225,9 @@ async function handleMessages(req, res) {
             if (aborted) break;
             if (!started) {
               buf.push(event);
-              // 确认有真实内容后才发 200 header。
-              if (event.includes('"text_delta"') || event.includes('"tool_use"')) {
+              // 确认有真实内容后才发 200 header。thinking 也是真实内容：
+              // 思考优先的响应不必等到首个文本/工具事件才响应客户端。
+              if (event.includes('"text_delta"') || event.includes('"tool_use"') || event.includes('"thinking_delta"')) {
                 res.writeHead(200, {
                   'Content-Type': 'text/event-stream',
                   'Cache-Control': 'no-cache',
@@ -1140,11 +1235,12 @@ async function handleMessages(req, res) {
                   'X-Accel-Buffering': 'no',
                 });
                 started = true;
-                for (const ev of buf) res.write(ev);
+                for (const ev of buf) await writeSse(res, ev);
                 buf.length = 0;
+                startPing();
               }
             } else {
-              res.write(event);
+              await writeSse(res, event);
             }
           }
 
@@ -1170,7 +1266,7 @@ async function handleMessages(req, res) {
               sendAnthropicError(res, 429, 'rate_limit_error', 'Empty response from upstream (zero output tokens)', 10);
               return;
             }
-            for (const ev of buf) { try { res.write(ev); } catch {} }
+            for (const ev of buf) { await writeSse(res, ev); }
             buf.length = 0;
           } else {
             if (!started) {
@@ -1182,7 +1278,7 @@ async function handleMessages(req, res) {
               });
               started = true;
             }
-            for (const ev of buf) res.write(ev);
+            for (const ev of buf) await writeSse(res, ev);
             buf.length = 0;
           }
         }
@@ -1229,19 +1325,21 @@ async function handleMessages(req, res) {
         }
       }
 
+      if (pingTimer) clearInterval(pingTimer);
       if (!res.writableEnded) res.end();
     } else {
       // ── 非流式 Anthropic JSON ──
-      const messageId = 'msg_' + randomUUID().slice(0, 12);
+      messageId = 'msg_' + randomUUID().slice(0, 12);
       let fullText = '';
+      let reasoningContent = '';
       let toolCalls = null;
       let finishReason = 'stop';
       let usage = null;
+      let stepUsage = null;
       let sawFinish = false;
       let shouldContinue = false;
       let streamError = false;
       let continuationCount = 0;
-      let bytesReceived = 0; let lastCcEvent = '';
 
       let buf = '';
 
@@ -1254,6 +1352,8 @@ async function handleMessages(req, res) {
           try {
             const event = JSON.parse(trimmed);
             switch (event.type) {
+              // 推理内容累积后写入响应的 thinking block，与流式路径行为一致。
+              case 'reasoning-delta': lastCcEvent = event.type; reasoningContent += event.text || ''; break;
               case 'text-delta': lastCcEvent = event.type; fullText += event.text || ''; break;
               case 'tool-call':
                 if (event.providerExecuted) break;
@@ -1269,6 +1369,11 @@ async function handleMessages(req, res) {
                       : JSON.stringify(event.input ?? event.args ?? {}),
                   },
                 });
+                break;
+              case 'finish-step':
+                lastCcEvent = event.type;
+                // finish 事件缺 totalUsage 时回退使用 step 级 usage，避免有正文却误判零输出。
+                if (event.usage && !stepUsage) stepUsage = event.usage;
                 break;
               case 'finish':
                 lastCcEvent = event.type;
@@ -1297,7 +1402,7 @@ async function handleMessages(req, res) {
                 // abort 是合法终止，不算零输出；有文本时避免触发零输出防护。
                 if (fullText && !usage) usage = { inputTokens: 0, outputTokens: 1 };
                 break;
-              case 'reasoning-end': case 'provider-metadata': case 'tool-input-start': case 'tool-input-delta': case 'tool-input-end': case 'tool-error': case 'text-end':
+              case 'reasoning-start': case 'reasoning-end': case 'provider-metadata': case 'tool-input-start': case 'tool-input-delta': case 'tool-input-end': case 'tool-error': case 'text-end':
                 // Silent - no user-visible content
                 break;
               default:
@@ -1313,12 +1418,7 @@ async function handleMessages(req, res) {
         const decoder = new TextDecoder();
         reader = ccResponse.body.getReader();
         while (true) {
-          const result = await Promise.race([
-            reader.read(),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('STREAM_IDLE_TIMEOUT')), NONSTREAM_IDLE_TIMEOUT_MS)
-            ),
-          ]);
+          const result = await readWithTimeout(reader, NONSTREAM_IDLE_TIMEOUT_MS);
           const { done, value } = result;
           if (done) {
             buf += decoder.decode();
@@ -1349,6 +1449,8 @@ async function handleMessages(req, res) {
 
       if (streamError) throw new Error('Upstream stream reported an error');
       if (!sawFinish) throw new Error('Upstream stream ended without finish event');
+      // finish 事件未带 totalUsage 时回退到 step 级 usage，避免有正文却按零输出处理。
+      if (!usage && stepUsage) usage = stepUsage;
       partialOutputLength = fullText.length;
 
       // 输出 token 为 0 时记为错误，避免下游异常计费
@@ -1359,7 +1461,7 @@ async function handleMessages(req, res) {
       }
 
       state.resetTimeout(apiKey);
-      sendJSON(res, 200, buildAnthropicResponse(model, fullText, toolCalls, finishReason, usage));
+      sendJSON(res, 200, buildAnthropicResponse(model, fullText, toolCalls, finishReason, usage, reasoningContent));
     }
   } catch (e) {
     if (abortController.signal.aborted) {
@@ -1493,8 +1595,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const host = req.headers.host || 'localhost';
-  const url = new URL(req.url, `http://${host}`);
+  // 用固定 base 解析 URL：客户端发来的 Host 头不参与解析，
+  // 畸形 Host 不会让这里抛异常导致请求无响应挂死。
+  const url = new URL(req.url, 'http://proxy.invalid');
 
   // 全局请求头校验：除豁免路径外都必须携带 Authorization 头，否则返回 UNAUTHORIZED。
   if (!isAuthExemptPath(url.pathname) && !getApiKey(req.headers)) {
@@ -1517,6 +1620,9 @@ const server = http.createServer(async (req, res) => {
       sendJSON(res, 404, { error: { message: 'Not found', type: 'not_found' } });
     }
   } catch (e) {
+    // 兜底 catch 必须落日志：这里曾因 catch 分支引用 try 内变量抛 ReferenceError，
+    // 却因无日志而长期不可见。
+    log('error', 'Request handler error', { path: url.pathname, message: e.message });
     if (!res.headersSent) sendJSON(res, 500, { error: { message: e.message, type: 'internal_error' } });
     else if (!res.destroyed) res.destroy(e);
   }
@@ -1561,6 +1667,17 @@ process.on('unhandledRejection', (reason) => {
     log('error', 'Unhandled rejection', { message: reason?.message || String(reason), stack: reason?.stack?.split('\n')[0] });
   }
 });
+
+// 优雅停机：停止接收新连接并等待在途请求完成；流式响应可能长时间占用连接，10s 后强制退出。
+function shutdown(signal) {
+  log('info', 'Shutting down', { signal });
+  state.stop?.();
+  server.closeIdleConnections?.();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 10000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 server.listen(CFG.port, CFG.host, () => {
   log('info', 'CC Proxy started', {

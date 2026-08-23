@@ -65,7 +65,7 @@ function terminateSocket(socket) {
   else socket.destroy();
 }
 
-export function forwardNativeToCC({ apiBase, method, requestUrl, headers, body, signal }) {
+export function forwardNativeToCC({ apiBase, method, requestUrl, headers, body, signal, idleTimeoutMs }) {
   const target = buildNativeTarget(apiBase, requestUrl);
   const requestImpl = requestForTarget(target);
 
@@ -81,6 +81,15 @@ export function forwardNativeToCC({ apiBase, method, requestUrl, headers, body, 
       settled = true;
       resolve(response);
     });
+
+    // 原生透传同样需要空闲超时：上游挂起时释放连接，而不是永久悬挂。
+    if (idleTimeoutMs > 0) {
+      upstreamRequest.setTimeout(idleTimeoutMs, () => {
+        const error = new Error('Native upstream idle timeout');
+        upstreamResponse?.destroy(error);
+        upstreamRequest.destroy(error);
+      });
+    }
 
     const abort = () => {
       const error = new Error('Native proxy request aborted');
@@ -202,9 +211,10 @@ export function buildCommandCodeHeaders({
     'x-cli-environment': cliEnvironment || 'production',
     'x-command-code-version': commandCodeVersion,
     'x-taste-learning': String(Boolean(tasteLearningEnabled)),
-    'x-project-slug': projectSlug,
-    'x-session-id': sessionId,
   };
+  // 省略缺失的可选头，避免 undefined 被字符串化成 "undefined" 发给上游。
+  if (projectSlug) headers['x-project-slug'] = projectSlug;
+  if (sessionId) headers['x-session-id'] = sessionId;
 
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   if (traceparent) headers.traceparent = traceparent;

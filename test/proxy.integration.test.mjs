@@ -14,10 +14,13 @@ let proxyUrl;
 let lastGenerateBody = null;
 let lastGenerateHeaders = null;
 let lastFingerprintBody = null;
+let lastModelsHeaders = null;
 let lastNativeRequest = null;
 let lastWebSocketRequest = null;
 let lastWebSocketClosed = null;
 const generateCallCounts = new Map();
+const fingerprintCallCounts = new Map();
+let proxyOutput = '';
 
 function readRequestBody(req) {
   return new Promise((resolveBody, reject) => {
@@ -58,6 +61,15 @@ before(async () => {
 
     if (req.url === '/alpha/fingerprint/record') {
       lastFingerprintBody = JSON.parse(bodyText);
+      const fingerprintAuthKey = req.headers.authorization || '';
+      const fingerprintCount = (fingerprintCallCounts.get(fingerprintAuthKey) || 0) + 1;
+      fingerprintCallCounts.set(fingerprintAuthKey, fingerprintCount);
+      // 指定 key 模拟上报失败，验证代理的短退避重试逻辑。
+      if (fingerprintAuthKey.includes('user_fingerprint_fail')) {
+        res.writeHead(500);
+        res.end('{}');
+        return;
+      }
       res.writeHead(200);
       res.end('{}');
       return;
@@ -70,6 +82,7 @@ before(async () => {
     }
 
     if (req.url === '/provider/v1/models') {
+      lastModelsHeaders = req.headers;
       res.writeHead(200);
       res.end(JSON.stringify({
         object: 'list',
@@ -88,10 +101,32 @@ before(async () => {
     if (req.url === '/alpha/generate') {
       lastGenerateBody = JSON.parse(bodyText);
       lastGenerateHeaders = req.headers;
-      res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
       const authKey = req.headers.authorization || '';
+      // 模拟上游限流：返回 429 + Retry-After 头，验证代理透传限流提示。
+      // 必须在通用 writeHead(200) 之前处理，避免二次 writeHead 抛错。
+      if (authKey.includes('user_rate_limited')) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '77' });
+        res.end(JSON.stringify({ error: { message: 'rate limited by upstream' } }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
       const callCount = (generateCallCounts.get(authKey) || 0) + 1;
       generateCallCounts.set(authKey, callCount);
+      // 模拟上游挂起：输出首个文本后不结束流，用于客户端断连回归测试。
+      if (authKey.includes('user_hang')) {
+        res.write('{"type":"start"}\n{"type":"text-delta","text":"部分输出"}\n');
+        return;
+      }
+      // finish 不带 totalUsage、只有 step 级 usage：验证非流式零输出回退逻辑。
+      if (authKey.includes('user_step_usage_only')) {
+        res.end([
+          { type: 'start' },
+          { type: 'text-delta', text: 'step usage only' },
+          { type: 'finish-step', usage: { inputTokens: 7, outputTokens: 3 } },
+          { type: 'finish', finishReason: 'stop' },
+        ].map(event => JSON.stringify(event)).join('\n') + '\n');
+        return;
+      }
       const events = authKey.includes('user_anthropic_thinking')
         ? [
           { type: 'start' },
@@ -158,6 +193,11 @@ before(async () => {
       return;
     }
 
+    if (req.url === '/alpha/native-hang') {
+      // 模拟上游挂起：不返回任何响应，验证透传空闲超时。
+      return;
+    }
+
     res.writeHead(404);
     res.end('{}');
   });
@@ -204,9 +244,16 @@ before(async () => {
       CC_API_BASE: `http://127.0.0.1:${upstreamPort}`,
       CC_USE_PROVIDER_MODELS: 'true',
       LOG_LEVEL: 'error',
+      // 指纹上报失败后的退避缩短到 1ms，便于测试短退避重试逻辑。
+      CC_INIT_RETRY_MS: '1',
+      // 原生透传空闲超时缩短到 50ms，便于测试上游挂起场景。
+      CC_NATIVE_IDLE_TIMEOUT_MS: '50',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // 收集代理进程输出，用于断言异常路径不会泄漏 ReferenceError。
+  proxyProcess.stdout.on('data', chunk => { proxyOutput += chunk; });
+  proxyProcess.stderr.on('data', chunk => { proxyOutput += chunk; });
   await waitForHealth(proxyUrl);
 });
 
@@ -509,6 +556,8 @@ test('OpenAI 流式工具调用和参数透传正常', async () => {
   assert.equal(lastGenerateHeaders['user-agent'], 'cli');
   assert.match(lastGenerateHeaders['x-command-code-version'], /^\d+\.\d+\.\d+(?:[-+].+)?$/);
   assert.match(lastGenerateHeaders['x-session-id'], /^sess_[0-9a-f]{16}$/);
+  // projectSlug 默认为空时按会话伪造 slug，而不是向上游暴露固定值 "cc-proxy"。
+  assert.match(lastGenerateHeaders['x-project-slug'], /^users-dev-projects-[a-z]+-[0-9a-f]{4}$/);
   assert.equal(lastFingerprintBody.components.runtime, 'cli');
   assert.equal(lastFingerprintBody.components.collectorVersion, 1);
   assert.equal(lastFingerprintBody.components.platform, process.platform);
@@ -736,4 +785,194 @@ test('Claude Code 流式工具调用输出 tool_use 事件序列', async () => {
   assert.match(body, /event: message_stop/);
   // tool-result 事件不应泄露给客户端。
   assert.doesNotMatch(body, /server-done/);
+});
+
+test('Anthropic 非流式响应包含 thinking 块', async () => {
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': 'user_anthropic_thinking_nonstream',
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 128,
+      thinking: { type: 'enabled', budget_tokens: 5000 },
+      messages: [{ role: 'user', content: 'hello' }],
+      stream: false,
+    }),
+  });
+
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  // 推理内容应进入 thinking 块，而不是被丢弃并刷 Unknown 警告。
+  assert.equal(body.content[0].type, 'thinking');
+  assert.equal(body.content[0].thinking, '让我想想再想想');
+  assert.equal(body.content[1].type, 'text');
+  assert.equal(body.content[1].text, 'Hello with thinking');
+  assert.equal(body.usage.output_tokens, 4);
+});
+
+test('指纹上报失败后走短退避，下一个请求会重试', async () => {
+  const requestBody = JSON.stringify({
+    model: 'demo-model',
+    max_tokens: 128,
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  const headers = { Authorization: 'Bearer user_fingerprint_fail', 'Content-Type': 'application/json' };
+
+  const first = await fetch(`${proxyUrl}/v1/chat/completions`, { method: 'POST', headers, body: requestBody });
+  assert.equal(first.status, 200);
+  const second = await fetch(`${proxyUrl}/v1/chat/completions`, { method: 'POST', headers, body: requestBody });
+  assert.equal(second.status, 200);
+
+  // 上报 500 时代理应安排短退避重试，而不是静默等待完整的 8h 周期。
+  assert.equal(fingerprintCallCounts.get('Bearer user_fingerprint_fail'), 2);
+});
+
+test('指纹上报成功后 8h 内不重复上报', async () => {
+  const requestBody = JSON.stringify({
+    model: 'demo-model',
+    max_tokens: 128,
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  const headers = { Authorization: 'Bearer user_fingerprint_ok', 'Content-Type': 'application/json' };
+
+  const first = await fetch(`${proxyUrl}/v1/chat/completions`, { method: 'POST', headers, body: requestBody });
+  assert.equal(first.status, 200);
+  const second = await fetch(`${proxyUrl}/v1/chat/completions`, { method: 'POST', headers, body: requestBody });
+  assert.equal(second.status, 200);
+
+  assert.equal(fingerprintCallCounts.get('Bearer user_fingerprint_ok'), 1);
+});
+
+test('模型列表请求头省略缺失的可选字段，不发送字面量 undefined', async () => {
+  await fetch(`${proxyUrl}/v1/models`);
+  assert.ok(lastModelsHeaders, '应已捕获模型列表请求头');
+  // 真实 CLI 不会发送值为 "undefined" 的头；缺失的可选头应整体省略。
+  assert.equal(lastModelsHeaders['x-project-slug'], undefined);
+  assert.equal(lastModelsHeaders['x-session-id'], undefined);
+  for (const [name, value] of Object.entries(lastModelsHeaders)) {
+    if (typeof value === 'string') assert.notEqual(value, 'undefined', `头 ${name} 不应为字面量 undefined`);
+  }
+});
+
+test('上游 429 的 Retry-After 头透传给客户端', async () => {
+  const response = await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer user_rate_limited', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'demo-model', messages: [{ role: 'user', content: 'hi' }] }),
+  });
+
+  assert.equal(response.status, 429);
+  // 上游返回的 Retry-After 应原样透传，而不是固定回退值 30。
+  assert.equal(response.headers.get('retry-after'), '77');
+  const body = await response.json();
+  assert.equal(body.error.type, 'rate_limit_error');
+  assert.equal(body.retry_after, 77);
+});
+
+test('finish 缺 totalUsage 时非流式回退 step 级 usage，不再误判零输出', async () => {
+  const response = await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer user_step_usage_only', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'demo-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: false,
+    }),
+  });
+
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.choices[0].message.content, 'step usage only');
+  assert.equal(body.usage.prompt_tokens, 7);
+  assert.equal(body.usage.completion_tokens, 3);
+});
+
+test('原生透传上游挂起时按空闲超时返回 502', async () => {
+  const response = await fetch(`${proxyUrl}/alpha/native-hang`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer user_native_hang', 'Content-Type': 'application/json' },
+    body: '{}',
+    signal: AbortSignal.timeout(5000),
+  });
+
+  assert.equal(response.status, 502);
+});
+
+test('OpenAI 端点请求体超限返回 413 并关闭连接', async () => {
+  const target = new URL(proxyUrl);
+  const socket = connect(Number(target.port), target.hostname);
+  socket.on('error', () => {});
+  await once(socket, 'connect');
+
+  let received = '';
+  socket.on('data', chunk => { received += chunk.toString('utf8'); });
+  const closed = once(socket, 'close');
+  socket.write([
+    'POST /v1/chat/completions HTTP/1.1',
+    `Host: ${target.host}`,
+    'Authorization: Bearer user_oversize_json',
+    `Content-Length: ${10 * 1024 * 1024 + 1}`,
+    'Content-Type: application/json',
+    '',
+    '',
+  ].join('\r\n'));
+  await closed;
+
+  assert.match(received, /^HTTP\/1\.1 413 Payload Too Large/);
+  assert.match(received, /Connection: close/i);
+});
+
+test('客户端中途断连不会触发 ReferenceError（回归）', async () => {
+  const requestBody = JSON.stringify({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 128,
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  const requestHeaders = {
+    'x-api-key': 'user_hang_disconnect',
+    'anthropic-version': '2023-06-01',
+    'Content-Type': 'application/json',
+  };
+
+  // 场景 1：流式响应中断开（走流式分支的 aborted 清理路径）。
+  {
+    const controller = new AbortController();
+    const response = await fetch(`${proxyUrl}/v1/messages`, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: JSON.stringify({ ...JSON.parse(requestBody), stream: true }),
+      signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    assert.ok(value.length > 0);
+    controller.abort();
+    try { await reader.cancel(); } catch {}
+  }
+
+  // 场景 2：非流式响应读取中断开——旧代码在这里引用 try 内声明的 messageId，
+  // 会抛 "messageId is not defined" 并被兜底 catch 记为内部错误。
+  {
+    const controller = new AbortController();
+    const pending = fetch(`${proxyUrl}/v1/messages`, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: requestBody,
+      signal: controller.signal,
+    });
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 200));
+    controller.abort();
+    await pending.catch(() => {});
+  }
+
+  // 等待代理处理完断连后，进程应保持健康且不抛 ReferenceError。
+  await new Promise(resolveDelay => setTimeout(resolveDelay, 300));
+  const health = await fetch(`${proxyUrl}/health`);
+  assert.equal(health.status, 200);
+  assert.doesNotMatch(proxyOutput, /ReferenceError|is not defined/);
 });
