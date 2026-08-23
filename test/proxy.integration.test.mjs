@@ -976,3 +976,47 @@ test('客户端中途断连不会触发 ReferenceError（回归）', async () =>
   assert.equal(health.status, 200);
   assert.doesNotMatch(proxyOutput, /ReferenceError|is not defined/);
 });
+
+test('指标端点 /stats 需要认证并返回延迟与限流统计', async () => {
+  // 未认证 → 401（/stats 不在豁免名单内，复用全局 user_ Key 校验）。
+  const unauth = await fetch(`${proxyUrl}/stats`);
+  assert.equal(unauth.status, 401);
+
+  // 产生一个成功的流式请求和一个上游 429 请求。
+  await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer user_metrics_ok', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'demo-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+  });
+  await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer user_rate_limited', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'demo-model', messages: [{ role: 'user', content: 'hi' }] }),
+  });
+
+  const response = await fetch(`${proxyUrl}/stats`, {
+    headers: { Authorization: 'Bearer user_metrics_viewer' },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+
+  assert.ok(body.totals.requests >= 2);
+  assert.ok(body.totals.ok >= 1);
+  assert.ok(body.totals.upstream_429 >= 1);
+  assert.ok(Array.isArray(body.recent) && body.recent.length >= 1);
+  assert.ok(body.recentRateLimits.length >= 1);
+  assert.equal(body.recentRateLimits[0].outcome, 'upstream_429');
+  // 成功的流式请求应记录首 token 延迟与总时长。
+  const okStream = body.recent.find(entry => entry.outcome === 'ok' && entry.stream === true);
+  assert.ok(okStream, '应至少有一条成功的流式请求记录');
+  assert.ok(typeof okStream.ttftMs === 'number');
+  assert.ok(typeof okStream.durationMs === 'number');
+});
+
+test('仪表盘页面可直接访问且不包含数据', async () => {
+  const response = await fetch(`${proxyUrl}/dashboard`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/html/);
+  const html = await response.text();
+  assert.match(html, /\/stats/);
+});
