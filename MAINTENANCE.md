@@ -143,10 +143,16 @@ WantedBy=multi-user.target
 
 ### 2.3 方式 B：Docker Compose 部署
 
+一条命令完成更新：
+
 ```bash
-cd /opt/commandcode-proxy
-git pull origin master
-docker compose up -d --build     # 镜像从本地源码构建，必须带 --build
+cd /opt/commandcode-proxy && git pull && docker compose up -d --build
+```
+
+镜像从本地源码构建（compose 里是 `build: .`），`--build` 不能省，否则容器仍跑旧镜像；
+compose 会先构建新镜像，构建失败时旧容器继续运行，不会中断服务。查看日志：
+
+```bash
 docker compose logs -f --tail 100 proxy
 ```
 
