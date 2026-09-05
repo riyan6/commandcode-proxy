@@ -4,7 +4,9 @@
 
 将 Command Code API 转换为 OpenAI / Anthropic 兼容接口的反代代理。Node.js ESM 实现，零外部依赖。
 
-基于本机 `command-code@1.32.1` CLI bundle 和真实流量抓包，对齐 Command Code API 请求协议，并实现多层兼容适配。
+基于本机 `command-code@1.47.0` CLI bundle 和真实流量抓包，对齐 Command Code API 请求协议，并实现多层兼容适配。
+
+> 维护入口：[MAINTENANCE.md](MAINTENANCE.md) —— 每周版本对齐提示词、VPS 更新流程与首次部署指南。
 
 **完整功能**：Command Code 原生 HTTP/WebSocket 透传 | OpenAI Chat Completions + Anthropic Messages API | 流式/非流式输出 | 工具调用 (tool_use) | 多模态图片输入 | 推理强度 (reasoning_effort) | 动态模型列表 | 缓存命中指标 | 客户端断连检测（上游中止） | 零输出 → 429 自动重试 | 连续超时 → 429 自动重试 | 隐私保护日志
 
@@ -62,7 +64,7 @@ commandcode/
 | `port` | `3050` | 监听端口 |
 | `host` | `0.0.0.0` | 监听地址 |
 | `apiBase` | `https://api.commandcode.ai` | CC API 地址 |
-| `protocolVersion` | `1.32.1` | 请求协议实现基线，同时作为 `x-command-code-version` 头发送 |
+| `protocolVersion` | `1.47.0` | 请求协议实现基线，同时作为 `x-command-code-version` 头发送 |
 | `cliEnvironment` | `production` | `x-cli-environment` 请求头 |
 | `userAgent` | `cli` | CLI 请求 User-Agent |
 | `projectSlug` | `""` (per-session fake slug) | `x-project-slug` header |
@@ -118,10 +120,10 @@ OpenAI Chat Completions 兼容。支持流式和非流式、工具调用、多�
 | `temperature` | 否 | 采样温度（0-2）|
 | `reasoning_effort` | 否 | 推理强度 `low`/`medium`/`high`/`xhigh`/`max`（是否支持取决于模型） |
 | `tools` | 否 | 工具定义（OpenAI function calling 格式）|
-| `tool_choice` | 否 | 接受但不发送给上游；1.32.1 CLI 信封不包含该字段 |
-| `parallel_tool_calls` | 否 | 接受但不发送给上游；1.32.1 CLI 信封不包含该字段 |
+| `tool_choice` | 否 | 接受但不发送给上游；CLI 信封不包含该字段 |
+| `parallel_tool_calls` | 否 | 接受但不发送给上游；CLI 信封不包含该字段 |
 
-为保持上游信封与 1.32.1 CLI 一致，`top_p`、`stop`、`user`、`presence_penalty`、`frequency_penalty`、`response_format`、`tool_choice` 和 `parallel_tool_calls` 不会转发给上游，因此不会影响实际生成。
+为保持上游信封与 1.47.0 CLI 一致，`top_p`、`stop`、`user`、`presence_penalty`、`frequency_penalty`、`response_format`、`tool_choice` 和 `parallel_tool_calls` 不会转发给上游，因此不会影响实际生成。
 
 **简单请求：**
 ```json
@@ -219,7 +221,7 @@ Anthropic Messages API 兼容端点。支持流式和非流式、工具调用。
 | 消息内容 | `content` 数组（text/tool_use/tool_result） | 自动映射为对应角色 |
 | 工具结果 | `user` 消息中的 `tool_result` 块 | 自动转为 `role: "tool"` |
 | 工具定义 | `input_schema` | 自动映射为 `parameters` |
-| `tool_choice` | `{type:"auto"/"any"/"tool"}` | 接受但不发送给上游，以保持 1.32.1 CLI 信封一致 |
+| `tool_choice` | `{type:"auto"/"any"/"tool"}` | 接受但不发送给上游，以保持 1.47.0 CLI 信封一致 |
 | 推理强度 | `thinking.budget_tokens` | 自动映射为 `reasoning_effort`（≥100000→max, ≥30000→xhigh, ≥10000→high, ≥5000→medium, 否则 low）；`adaptive` 模式直接透传 `effort` |
 | 停止原因 | `end_turn`/`max_tokens`/`tool_use` | 自动映射为 `stop`/`length`/`tool_calls` |
 | Token 用量 | `input_tokens`/`output_tokens` + 缓存 | 透传，缓存字段映射为 Anthropic 格式 |
@@ -281,14 +283,14 @@ data: {"type":"message_stop"}
 
 ### Command Code 原生透传
 
-代理会在相同路径透传 Command Code 原生 API。`/alpha/*`、`/provider/*` 以及 1.32.1 bundle 声明的 `/beta/*`、`/internal/*` 会被发送到固定的 `apiBase`；其他路径不会转发，因此它不是任意 URL 代理。
+代理会在相同路径透传 Command Code 原生 API。`/alpha/*`、`/provider/*` 以及 1.47.0 bundle 声明的 `/beta/*`、`/internal/*` 会被发送到固定的 `apiBase`；其他路径不会转发，因此它不是任意 URL 代理。
 
 原生接口保留 HTTP method、query、请求体原始字节、认证/OAuth/Cookie 请求头、上游状态码、响应头和响应流。只移除 `Host`、`Connection`、`Transfer-Encoding` 等逐跳头；3xx 响应不会自动跟随。请求体上限仍为 10MB。生产部署建议为原生入口使用专用域名，避免与其他 Web 应用共享 Cookie。
 
 ```bash
 curl http://127.0.0.1:3050/alpha/whoami \
   -H "Authorization: Bearer user_xxxxxxxxx" \
-  -H "x-command-code-version: 1.32.1"
+  -H "x-command-code-version: 1.47.0"
 ```
 
 `POST /alpha/generate` 会返回原生逐行 JSON（NDJSON），不会转换为 OpenAI SSE。沙箱实时通道使用相同路径的 WebSocket 隧道，例如 `ws://127.0.0.1:3050/alpha/sandbox/stream/...`。外部 OAuth、npm 更新、遥测和用户自定义 MCP 地址不属于 Command API origin，不会被这个入口代理。
@@ -403,18 +405,18 @@ claude
 
 ## 反检测
 
-基于对本机 `command-code@1.32.1` bundle 和 1.32.1 CLI 实际流量的分析，实现了以下兼容适配：
+基于对本机 `command-code@1.47.0` bundle 的逐函数分析与 1.32.1 CLI 实际流量抓包，实现了以下兼容适配：
 
 | 机制 | 实现 |
 |------|------|
 | **按 Key 分 Session** | 每个 API Key 独立 session，12h 过期 + 1h 随机抖动 |
-| **协议基线 / 版本头** | 请求协议与 `x-command-code-version` 都固定为 `1.32.1`（`protocolVersion`）；不再跟随 npm latest，发送的版本号始终与实现一致 |
+| **协议基线 / 版本头** | 请求协议与 `x-command-code-version` 都固定为 `1.47.0`（`protocolVersion`）；不再跟随 npm latest，发送的版本号始终与实现一致 |
 | **CLI 信封格式** | config/memory/taste/skills/permissionMode/mode/params/threadId |
-| **工具与图片格式** | 工具字段、base64 图片和 mimeType 对齐最新版 wire format；tool-result 回填 toolName |
-| **流式续接** | `pause_turn` 最多按同一请求线程继续两次 |
+| **工具与图片格式** | 工具字段、base64 图片和 mimeType 对齐 1.47.0 wire format；tool-result 回填 toolName，历史消息中的 `tool_search` 按 CLI 规则重命名为 `search_tools` |
+| **流式续接** | `pause_turn` 最多按同一请求线程继续 5 次（对齐 1.47.0 的重试上限） |
 | **服务端工具结果** | 1.31.0 的 `tool-result` 事件（provider 执行）对 OpenAI/Anthropic 客户端静默跳过 |
 | **上游 abort** | 1.31.0 的 `abort` 事件视为正常结束 |
-| **稳定指纹** | 按 API Key 派生平台匹配的完整设备档案，CPU、核心数和内存保持一致，重启后稳定 |
+| **稳定指纹** | 按 1.47.0 的加盐指纹算法（`command-code:device-fingerprint:v1` 盐 + machineId/MAC 信号哈希）生成；信号值按 API Key 派生，CPU、核心数和内存保持一致，重启后稳定 |
 | **OpenTelemetry** | 同一轮请求复用 trace ID，每次上游调用生成独立 span ID |
 | **环境标识** | `x-cli-environment: production` |
 | **工作区身份** | 按 API Key 派生稳定 Git 工作区，`workingDir` 与 `x-project-slug` 始终指向同一项目 |
@@ -465,7 +467,7 @@ claude
 }
 ```
 
-客户端未提供有效 `threadId` 时，代理会按 API Key 会话生成 UUID；同一个 UUID 同时作为 `threadId` 和 `x-session-id` 发送，与 1.32.1 CLI 一致。
+客户端未提供有效 `threadId` 时，代理会按 API Key 会话生成 UUID；同一个 UUID 同时作为 `threadId` 和 `x-session-id` 发送，与 CLI 一致。
 
 ### CC API 图片消息格式
 

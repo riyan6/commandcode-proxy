@@ -87,6 +87,8 @@ function buildWireMessages(messages) {
   // 1.31.0 的 toWireMessages 会记录 toolCallId → toolName 映射，
   // 后续 tool-result 用该映射回填工具名，找不到时用 "unknown"。
   const toolNameById = new Map();
+  // 1.47.0 的 toWireToolName：历史消息里的 tool_search 统一以 search_tools 上送。
+  const toWireToolName = name => (name === 'tool_search' ? 'search_tools' : name);
 
   for (const message of messages) {
     // system/developer 会被提升到 params.system，不能直接进入上游 messages。
@@ -104,7 +106,7 @@ function buildWireMessages(messages) {
       }
 
       for (const toolCall of message.tool_calls || []) {
-        const toolName = toolCall.function?.name || '';
+        const toolName = toWireToolName(toolCall.function?.name || '');
         toolNameById.set(toolCall.id, toolName);
         content.push({
           type: 'tool-call',
@@ -297,6 +299,10 @@ export function buildCcRequest(openaiReq, {
   const systemMsgs = messages.filter(
     message => message.role === 'system' || message.role === 'developer',
   );
+  const systemPrompt = systemMsgs.map(message => textFromContent(message.content)).filter(Boolean).join('\n');
+
+  // 1.47.0 的 params 键序：model → messages → tools → system → max_tokens → stream，
+  // temperature / reasoning_effort 按需附加在末尾；键序本身也是关联特征，不能打乱。
   const body = {
     config: buildServerConfig(serverConfig),
     memory: null,
@@ -309,16 +315,15 @@ export function buildCcRequest(openaiReq, {
       model: model || 'deepseek/deepseek-v4-flash',
       messages: buildWireMessages(messages),
       tools: toWireTools(tools || []),
+      // 1.47.0 中 system 恒位于 tools 与 max_tokens 之间；无系统提示时整体省略。
+      ...(systemPrompt ? { system: systemPrompt } : {}),
       max_tokens: max_tokens ?? 64000,
       stream: true,
     },
   };
 
-  const systemPrompt = systemMsgs.map(message => textFromContent(message.content)).filter(Boolean).join('\n');
-
   // 1.32.1 原生 CLI 只会附加 temperature 和 reasoning_effort；
   // OpenAI 专属参数不能继续塞进上游信封，否则会形成稳定的协议特征。
-  if (systemPrompt) body.params.system = systemPrompt;
   if (temperature !== undefined) body.params.temperature = temperature;
   if (reasoning_effort !== undefined) body.params.reasoning_effort = reasoning_effort;
 

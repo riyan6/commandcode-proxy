@@ -10,7 +10,7 @@ import {
   projectSlugFromWorkspace,
 } from '../src/adapters.mjs';
 
-test('请求体与 command-code 1.32.1 的 CLI 信封和工具格式一致', () => {
+test('请求体与 command-code 1.47.0 的 CLI 信封和工具格式一致', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [
@@ -58,7 +58,7 @@ test('请求体与 command-code 1.32.1 的 CLI 信封和工具格式一致', () 
   assert.ok(body.params.messages.every(message => Array.isArray(message.content)));
 });
 
-test('伪工作区按 Key 稳定并符合 1.32.1 的 Git 字段形状', () => {
+test('伪工作区按 Key 稳定并符合 CLI 的 Git 字段形状', () => {
   const first = buildFakeWorkspace('salt:user_a');
   const again = buildFakeWorkspace('salt:user_a');
   const other = buildFakeWorkspace('salt:user_b');
@@ -138,6 +138,96 @@ test('1.31.0 tool-result 找不到对应工具名时回填 unknown', () => {
   assert.equal(toolResults[0].content[0].toolName, 'unknown');
 });
 
+test('params 键序对齐 1.47.0：system 位于 tools 与 max_tokens 之间', () => {
+  const body = buildCcRequest({
+    model: 'demo-model',
+    messages: [
+      { role: 'system', content: '系统提示' },
+      { role: 'user', content: 'hi' },
+    ],
+    max_tokens: 128,
+  });
+
+  // JSON 键序是请求关联特征，必须与 1.47.0 的 buildGenerateBody 一致。
+  assert.deepEqual(Object.keys(body.params), [
+    'model',
+    'messages',
+    'tools',
+    'system',
+    'max_tokens',
+    'stream',
+  ]);
+
+  // 无系统提示时整体省略 system 键，与 CLI 中 system 为 undefined 被 JSON 丢弃一致。
+  const noSystem = buildCcRequest({
+    model: 'demo-model',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.deepEqual(Object.keys(noSystem.params), [
+    'model',
+    'messages',
+    'tools',
+    'max_tokens',
+    'stream',
+  ]);
+
+  // temperature / reasoning_effort 附加在末尾。
+  const withTemp = buildCcRequest({
+    model: 'demo-model',
+    messages: [
+      { role: 'system', content: '系统提示' },
+      { role: 'user', content: 'hi' },
+    ],
+    temperature: 0.4,
+    reasoning_effort: 'high',
+  });
+  assert.deepEqual(Object.keys(withTemp.params), [
+    'model',
+    'messages',
+    'tools',
+    'system',
+    'max_tokens',
+    'stream',
+    'temperature',
+    'reasoning_effort',
+  ]);
+});
+
+test('历史消息中的 tool_search 按 1.47.0 规则重命名为 search_tools', () => {
+  const body = buildCcRequest({
+    model: 'demo-model',
+    messages: [
+      { role: 'user', content: '搜索工具' },
+      { role: 'assistant', content: '调用搜索', tool_calls: [{
+        id: 'call_search',
+        function: { name: 'tool_search', arguments: '{"query":"fp"}' },
+      }] },
+      { role: 'tool', tool_call_id: 'call_search', content: '命中' },
+    ],
+  });
+
+  const assistantMessage = body.params.messages.find(message => message.role === 'assistant');
+  // toWireToolName：assistant 历史里的 tool_search 统一以 search_tools 上送。
+  // 文本块在前，tool-call 块在后。
+  const toolCallPart = assistantMessage.content.find(part => part.type === 'tool-call');
+  assert.equal(toolCallPart.toolName, 'search_tools');
+
+  // tool-result 依据映射回填重命名后的工具名。
+  const toolMessage = body.params.messages.find(message => message.role === 'tool');
+  assert.equal(toolMessage.content[0].toolName, 'search_tools');
+
+  // 工具定义不做重命名（toWireTools 原样透传）。
+  const defined = buildCcRequest({
+    model: 'demo-model',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [{
+      type: 'function',
+      function: { name: 'tool_search', description: '搜索', parameters: { type: 'object', properties: {} } },
+    }],
+  });
+  assert.equal(defined.params.tools[0].name, 'tool_search');
+});
+
 test('1.31.0 usage 的缓存字段在 inputTokenDetails.cacheReadTokens', () => {
   const usage = { inputTokens: 10, outputTokens: 5, inputTokenDetails: { cacheReadTokens: 8 } };
   assert.equal(getCacheReadTokens(usage), 8);
@@ -197,7 +287,7 @@ test('OpenAI 路径的 reasoning_effort 原样透传到 CC 请求体', () => {
   assert.equal(maxBody.params.reasoning_effort, 'max');
 });
 
-test('1.32.1 请求信封过滤 OpenAI 专属可选参数', () => {
+test('1.47.0 请求信封过滤 OpenAI 专属可选参数', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [{ role: 'user', content: 'hi' }],

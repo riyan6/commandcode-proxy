@@ -25,7 +25,7 @@ export function createStateStore({ generateFingerprint, log }) {
     }
 
     const jitter = Math.floor(Math.random() * sessionJitterMs);
-    // 真实抓包（1.32.1）显示 x-session-id 是 UUID（与 threadId 相同，每个会话一个）；
+    // 真实抓包（1.32.1/1.47.0）显示 x-session-id 是 UUID（与 threadId 相同，每个会话一个）；
     // sess_ 前缀 + 16 位十六进制格式只出现在 lifecycle-events 载荷里。
     const sessionId = randomUUID();
     sessionStore.set(apiKey, {

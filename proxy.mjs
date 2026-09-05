@@ -38,7 +38,7 @@ import {
 
 const CFG = loadConfig();
 
-// 请求体和字段转换固定按 command-code@1.32.1 实现，避免协议随上游版本漂移。
+// 请求体和字段转换固定按 command-code@1.47.0 实现，避免协议随上游版本漂移。
 // 发送给上游的 x-command-code-version 头与实现基线保持一致（protocolVersion），
 // 不再跟随 npm latest，避免“头版本新但特性旧”被后端识别出代理伪装。
 const CC_VERSION = CFG.protocolVersion;
@@ -126,7 +126,7 @@ async function ensureInitialized(apiKey, signal) {
       });
       const fingerprint = keyState.fingerprint || {};
 
-      // 真实 CLI（1.32.1 抓包实测）会话建立时 POST /alpha/lifecycle-events：
+      // 真实 CLI（1.32.1/1.47.0 抓包与 bundle 实测）会话建立时 POST /alpha/lifecycle-events：
       // {"eventType":"cli_session_exists","metadata":{"sessionId":"sess_…","cliVersion":"…","mode":"interactive","os":"win32-x64"}}
       // 之前的注释"1.31.0 已移除该端点"与实测不符；失败不阻塞主流程。
       try {
@@ -888,8 +888,8 @@ async function handleChatCompletions(req, res) {
             }
           }
 
-          // 最新 CLI 遇到 pause_turn 时最多继续请求两次，并复用同一线程。
-          if (translator.shouldContinue && continuationCount < 2 && !aborted) {
+          // 1.47.0 遇到 pause_turn 时最多继续请求 5 次（bh=5），并复用同一线程。
+          if (translator.shouldContinue && continuationCount < 5 && !aborted) {
             continuationCount += 1;
             translator.beginContinuation();
             ccResponse = await forwardRequest();
@@ -1075,7 +1075,7 @@ async function handleChatCompletions(req, res) {
           processLines();
         }
 
-        if (shouldContinue && continuationCount < 2) {
+        if (shouldContinue && continuationCount < 5) {
           continuationCount += 1;
           shouldContinue = false;
           ccResponse = await forwardRequest();
@@ -1373,7 +1373,7 @@ async function handleMessages(req, res) {
             }
           }
 
-          if (ctx.shouldContinue && continuationCount < 2 && !aborted) {
+          if (ctx.shouldContinue && continuationCount < 5 && !aborted) {
             continuationCount += 1;
             ctx.shouldContinue = false;
             ctx.finished = false;
@@ -1569,7 +1569,7 @@ async function handleMessages(req, res) {
           processLines();
         }
 
-        if (shouldContinue && continuationCount < 2) {
+        if (shouldContinue && continuationCount < 5) {
           continuationCount += 1;
           shouldContinue = false;
           ccResponse = await forwardRequest();

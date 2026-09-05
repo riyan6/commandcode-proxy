@@ -592,7 +592,7 @@ test('OpenAI 流式工具调用和参数透传正常', async () => {
   assert.equal(lastFingerprintHeaders['x-taste-learning'], undefined);
   assert.equal(lastLifecycleBody.eventType, 'cli_session_exists');
   assert.match(lastLifecycleBody.metadata.sessionId, /^sess_[0-9a-f]{16}$/);
-  assert.equal(lastLifecycleBody.metadata.cliVersion, '1.32.1');
+  assert.equal(lastLifecycleBody.metadata.cliVersion, '1.47.0');
   assert.equal(lastLifecycleHeaders['x-project-slug'], undefined);
 });
 

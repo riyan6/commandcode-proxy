@@ -192,7 +192,8 @@ export function generateTraceparent(traceId = generateTraceId()) {
 }
 
 // 统一构造最新版 CLI 使用的公共请求头，初始化、生成和模型请求共用同一套规则。
-// 请求头字段对齐 command-code@1.32.1 的 buildCommandAuthHeaders。
+// 请求头字段对齐 command-code@1.47.0 的 buildCommandAuthHeaders：
+// x-taste-learning / x-project-slug / x-session-id 恒定输出，可选头缺省时省略。
 export function buildCommandCodeHeaders({
   apiKey,
   commandCodeVersion,
