@@ -13,7 +13,6 @@ import { createStateStore } from './src/state.mjs';
 import { generateFingerprint } from './src/fingerprint.mjs';
 import { validateAnthropicRequest, validateOpenAIRequest } from './src/validation.mjs';
 import { readWithTimeout } from './src/stream.mjs';
-import { beginRequest, createMetricsStore } from './src/metrics.mjs';
 import {
   buildCommandCodeHeaders,
   filterProxyHeaders,
@@ -83,10 +82,6 @@ const state = createStateStore({
   generateFingerprint: apiKey => generateFingerprint(apiKey, { salt: CFG.fingerprintSalt }),
   log,
 });
-
-// 代理自身的运行时指标（首 token 延迟、请求时长、上游 429/402），
-// 仅内存保存、重启清零；用量统计由 commandcode 官方后台提供。
-const metrics = createMetricsStore();
 
 function getTimeoutMessage(apiKey) {
   const timeoutCount = state.recordTimeout(apiKey);
@@ -712,7 +707,6 @@ async function handleChatCompletions(req, res) {
   const model = openaiReq.model || 'deepseek/deepseek-v4-flash';
   const completionId = `chatcmpl-${randomUUID().slice(0, 12)}`;
   const created = nowUnix();
-  const requestMetrics = beginRequest(metrics, { path: '/v1/chat/completions', model, stream });
 
   // 构建 CC 请求体：threadId 优先取客户端传入，未传时用会话 ID
   // （真实 CLI 的 threadId 与 x-session-id 相同，均为 UUID，整个会话不变）。
@@ -741,7 +735,7 @@ async function handleChatCompletions(req, res) {
   const abortController = new AbortController();
   let aborted = false;
   let partialOutputLength = 0;
-  // 以下统计变量提升到 try 外声明：外层 catch 的日志分支会引用它们，
+  // 以下变量提升到 try 外声明：外层 catch 的日志分支会引用它们，
   // 若声明在 try 块内，catch 中访问会抛 ReferenceError 并破坏错误响应。
   let reader = null;
   let translator = null;
@@ -777,11 +771,6 @@ async function handleChatCompletions(req, res) {
     if (!ccResponse.ok) {
       const errorText = await ccResponse.text().catch(() => '');
       log('error', 'CC API error', { status: ccResponse.status });
-      requestMetrics.finish(
-        ccResponse.status === 429 ? 'upstream_429'
-          : ccResponse.status === 402 ? 'upstream_402'
-            : 'upstream_error',
-      );
       const mapped = mapCcError(ccResponse.status, errorText, ccResponse.headers.get('retry-after'));
       sendJSON(res, mapped.status, mapped.body);
       return;
@@ -791,7 +780,6 @@ async function handleChatCompletions(req, res) {
     res.on('close', () => {
       if (res.writableEnded) return; // Normal completion, not a disconnect
       aborted = true;
-      requestMetrics.finish('client_disconnect');
       const reason = lastCcEvent?.startsWith('tool-input') ? 'tool-input-silent-timeout'
         : lastCcEvent?.includes('delta') ? 'streaming-active-disconnect'
         : 'client-hangup';
@@ -840,8 +828,6 @@ async function handleChatCompletions(req, res) {
           'X-Accel-Buffering': 'no',
         });
         started = true;
-        // 首个流式内容事件到达客户端的时刻，即首 token 延迟。
-        requestMetrics.markFirstToken();
       };
 
       try {
@@ -908,7 +894,6 @@ async function handleChatCompletions(req, res) {
           // 输出 token 为 0 时记为错误，避免下游异常计费。
           if (translator.outputTokens === 0) {
             try { if (!abortController.signal.aborted) abortController.abort(); } catch {}
-            requestMetrics.finish('empty_output');
             if (!started) {
               sendJSON(res, 429, { error: { message: 'Empty response from upstream (zero output tokens)', type: 'rate_limit_error' }, retry_after: 10 });
               return;
@@ -917,16 +902,13 @@ async function handleChatCompletions(req, res) {
           } else {
             ensureStarted();
             await writeSse(res, translator.getDoneEvent());
-            requestMetrics.finish('ok');
           }
         }
       } catch (e) {
         if (aborted) {
           // 客户端已断连，只清理（close handler 已调用 abortController.abort()）
-          requestMetrics.finish('client_disconnect');
           try { reader.cancel(); } catch {}
         } else if (e.message === 'STREAM_IDLE_TIMEOUT') {
-          requestMetrics.finish('timeout');
           log('warn', 'Stream idle timeout', {
             path: '/v1/chat/completions',
             model,
@@ -952,7 +934,6 @@ async function handleChatCompletions(req, res) {
             try { res.destroy(); } catch {}
           }
         } else {
-          requestMetrics.finish('proxy_error');
           log('error', 'Stream error', { message: e.message });
           try { abortController.abort(); } catch {} // 打断 CC 上游
           if (!started) {
@@ -1094,12 +1075,10 @@ async function handleChatCompletions(req, res) {
       // 输出 token 为 0 时记为错误，避免下游异常计费
       if ((usage?.outputTokens ?? 0) === 0) {
         try { if (!abortController.signal.aborted) abortController.abort(); } catch {}
-        requestMetrics.finish('empty_output');
         sendJSON(res, 429, { error: { message: 'Empty response from upstream (zero output tokens)', type: 'rate_limit_error' }, retry_after: 10 });
         return;
       }
 
-      requestMetrics.finish('ok');
       state.resetTimeout(apiKey);
       sendJSON(res, 200, {
         id: completionId,
@@ -1129,14 +1108,12 @@ async function handleChatCompletions(req, res) {
     }
   } catch (e) {
     if (abortController.signal.aborted) {
-      requestMetrics.finish('client_disconnect');
       log('warn', 'Request cancelled (client disconnected before CC response)', {
         path: '/v1/chat/completions',
         model,
         completionId,
       });
     } else if (e.message === 'STREAM_IDLE_TIMEOUT') {
-      requestMetrics.finish('timeout');
       log('warn', 'Stream idle timeout', {
         path: '/v1/chat/completions',
         model,
@@ -1154,7 +1131,6 @@ async function handleChatCompletions(req, res) {
       res.setHeader('Retry-After', '5');
       sendJSON(res, 429, { error: { message: timeoutMsg, type: 'rate_limit_error', input_tokens: 0 }, retry_after: 5 });
     } else {
-      requestMetrics.finish('proxy_error');
       log('error', 'Upstream error', { message: e.message });
       try { abortController.abort(); } catch {} // 打断 CC 上游
       sendJSON(res, 502, { error: { message: `Upstream error: ${e.message}`, type: 'proxy_error', input_tokens: 0 }, retry_after: 10 });
@@ -1214,7 +1190,6 @@ async function handleMessages(req, res) {
 
   const stream = anthropicReq.stream === true;
   const model = anthropicReq.model || 'claude-sonnet-4-6';
-  const requestMetrics = beginRequest(metrics, { path: '/v1/messages', model, stream });
 
   // Convert Anthropic → OpenAI → CC：threadId 规则与 OpenAI 端点一致。
   const openaiReq = convertAnthropicToOpenAI(anthropicReq);
@@ -1242,7 +1217,7 @@ async function handleMessages(req, res) {
   const abortController = new AbortController();
   let aborted = false;
   let partialOutputLength = 0;
-  // 同 handleChatCompletions：统计变量提升到 try 外声明，供外层 catch 分支引用。
+  // 同 handleChatCompletions：变量提升到 try 外声明，供外层 catch 分支引用。
   let reader = null;
   const startTime = Date.now();
   let messageId = '';
@@ -1275,11 +1250,6 @@ async function handleMessages(req, res) {
     if (!ccResponse.ok) {
       const errorText = await ccResponse.text().catch(() => '');
       log('error', 'CC API error (Anthropic)', { status: ccResponse.status });
-      requestMetrics.finish(
-        ccResponse.status === 429 ? 'upstream_429'
-          : ccResponse.status === 402 ? 'upstream_402'
-            : 'upstream_error',
-      );
       const mapped = mapCcError(ccResponse.status, errorText, ccResponse.headers.get('retry-after'));
       sendAnthropicError(res, mapped.status, mapped.body.error.type, mapped.body.error.message);
       return;
@@ -1289,7 +1259,6 @@ async function handleMessages(req, res) {
     res.on('close', () => {
       if (res.writableEnded) return; // Normal completion, not a disconnect
       aborted = true;
-      requestMetrics.finish('client_disconnect');
       if (!abortController.signal.aborted) {
         // 断连前抢发 usage=0 终止事件，避免下游自行估算 token
         try {
@@ -1363,8 +1332,6 @@ async function handleMessages(req, res) {
                 for (const ev of buf) await writeSse(res, ev);
                 buf.length = 0;
                 startPing();
-                // 首个流式内容事件到达客户端的时刻，即首 token 延迟。
-                requestMetrics.markFirstToken();
               }
             } else {
               await writeSse(res, event);
@@ -1389,7 +1356,6 @@ async function handleMessages(req, res) {
           state.resetTimeout(apiKey);
           if (ctx.outputTokens === 0) {
             try { abortController.abort(); } catch {}
-            requestMetrics.finish('empty_output');
             if (!started) {
               sendAnthropicError(res, 429, 'rate_limit_error', 'Empty response from upstream (zero output tokens)', 10);
               return;
@@ -1408,15 +1374,12 @@ async function handleMessages(req, res) {
             }
             for (const ev of buf) await writeSse(res, ev);
             buf.length = 0;
-            requestMetrics.finish('ok');
           }
         }
       } catch (e) {
         if (aborted) {
           // 客户端已断连，只清理（close handler 已调用 abortController.abort()）
-          requestMetrics.finish('client_disconnect');
         } else if (e.message === 'STREAM_IDLE_TIMEOUT') {
-          requestMetrics.finish('timeout');
           log('warn', 'Stream idle timeout', {
             path: '/v1/messages',
             model,
@@ -1442,7 +1405,6 @@ async function handleMessages(req, res) {
             try { res.destroy(); } catch {}
           }
         } else {
-          requestMetrics.finish('proxy_error');
           log('error', 'Anthropic stream error', { message: e.message });
           try { abortController.abort(); } catch {} // 打断 CC 上游
           if (!started) {
@@ -1588,25 +1550,21 @@ async function handleMessages(req, res) {
       // 输出 token 为 0 时记为错误，避免下游异常计费
       if ((usage?.outputTokens ?? 0) === 0) {
         try { if (!abortController.signal.aborted) abortController.abort(); } catch {}
-        requestMetrics.finish('empty_output');
         sendAnthropicError(res, 429, 'rate_limit_error', 'Empty response from upstream (zero output tokens)', 10);
         return;
       }
 
-      requestMetrics.finish('ok');
       state.resetTimeout(apiKey);
       sendJSON(res, 200, buildAnthropicResponse(model, fullText, toolCalls, finishReason, usage, reasoningContent));
     }
   } catch (e) {
     if (abortController.signal.aborted) {
-      requestMetrics.finish('client_disconnect');
       log('warn', 'Request cancelled (client disconnected before CC response)', {
         path: '/v1/messages',
         model,
         messageId,
       });
     } else if (e.message === 'STREAM_IDLE_TIMEOUT') {
-      requestMetrics.finish('timeout');
       log('warn', 'Stream idle timeout', {
         path: '/v1/messages',
         model,
@@ -1624,7 +1582,6 @@ async function handleMessages(req, res) {
       res.setHeader('Retry-After', '5');
       sendAnthropicError(res, 429, 'rate_limit_error', timeoutMsg);
     } else {
-      requestMetrics.finish('proxy_error');
       log('error', 'Upstream error', { message: e.message });
       try { abortController.abort(); } catch {} // 打断 CC 上游
       sendAnthropicError(res, 502, 'proxy_error', `Upstream error: ${e.message}`, 10);
@@ -1749,9 +1706,6 @@ const server = http.createServer(async (req, res) => {
       await handleMessages(req, res);
     } else if (url.pathname === '/v1/models' && req.method === 'GET') {
       await handleModels(req, res);
-    } else if (url.pathname === '/stats' && req.method === 'GET') {
-      // 指标数据接口：需要认证（复用全局 user_ Key 校验），快照仅存内存。
-      sendJSON(res, 200, metrics.snapshot());
     } else if (url.pathname === '/health' || url.pathname === '/') {
       handleHealth(req, res);
     } else if (isCommandCodeNativePath(url.pathname)) {

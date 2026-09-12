@@ -274,12 +274,6 @@ Returns the official Provider API model list (5 min cache); the upstream endpoin
 
 Health check. Returns `OK`.
 
-### `GET /stats`
-
-Proxy-side runtime metrics (for token usage see the official Command Code dashboard):
-
-- `GET /stats`: JSON snapshot, requires API key auth. Includes time-to-first-token (p50/p95/avg), request duration, upstream 429/402 counts and ratio, timeout/empty-output/disconnect counters, per-model totals, the last 500 requests and a rate-limit event timeline. In-memory only, reset on restart.
-
 ### Native Command Code Pass-Through
 
 The proxy forwards native Command Code API requests on the same path. `/alpha/*`, `/provider/*`, and the `/beta/*` and `/internal/*` namespaces declared by the 1.53.1 bundle are sent only to the configured `apiBase`. Other paths are not forwarded, so this is not an arbitrary URL proxy.

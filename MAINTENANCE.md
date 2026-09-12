@@ -261,9 +261,7 @@ API Key 的用法：客户端每次请求带 `Authorization: Bearer user_xxx`（
 
 ```bash
 curl http://127.0.0.1:3050/health
-# 应返回 OK；随后用真实 Key 跑一次 2.4 节的最小生成请求，
-# 再带 Key 请求 /stats 确认指标已开始计数：
-curl http://127.0.0.1:3050/stats -H "Authorization: Bearer user_xxxxxxxxx"
+# 应返回 OK；随后用真实 Key 跑一次 2.4 节的最小生成请求即可。
 ```
 
 之后每周回到第 1 节做版本对齐即可。
