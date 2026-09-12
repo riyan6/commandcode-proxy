@@ -1054,14 +1054,6 @@ test('指标端点 /stats 需要认证并返回延迟与限流统计', async () 
   assert.ok(typeof okStream.durationMs === 'number');
 });
 
-test('仪表盘页面可直接访问且不包含数据', async () => {
-  const response = await fetch(`${proxyUrl}/dashboard`);
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get('content-type'), /text\/html/);
-  const html = await response.text();
-  assert.match(html, /\/stats/);
-});
-
 test('RECORD_WIRE 将原生透传请求脱敏后逐行记录到文件', async () => {
   await fetch(`${proxyUrl}/alpha/native-test?mode=record`, {
     method: 'POST',

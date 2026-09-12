@@ -274,12 +274,11 @@ data: {"type":"message_stop"}
 
 健康检查。返回 `OK`。
 
-### `GET /stats` 与 `GET /dashboard`
+### `GET /stats`
 
 代理自身运行指标（用量统计请看 Command Code 官方后台）：
 
 - `GET /stats`：JSON 快照，需携带 API Key 认证。包含首 token 延迟（p50/p95/avg）、请求时长、上游 429/402 次数与占比、超时/零输出/断连计数、按模型汇总、最近 500 条请求明细与限流事件时间线。仅存内存，重启清零。
-- `GET /dashboard`：单文件指标页面（无需认证，页面不含数据）。首次打开弹窗输入 API Key 并保存在浏览器 localStorage，之后直接访问；页面每 5 秒自动刷新。
 
 ### Command Code 原生透传
 

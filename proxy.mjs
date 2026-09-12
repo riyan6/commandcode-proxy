@@ -14,7 +14,6 @@ import { generateFingerprint } from './src/fingerprint.mjs';
 import { validateAnthropicRequest, validateOpenAIRequest } from './src/validation.mjs';
 import { readWithTimeout } from './src/stream.mjs';
 import { beginRequest, createMetricsStore } from './src/metrics.mjs';
-import { DASHBOARD_HTML } from './src/dashboard.mjs';
 import {
   buildCommandCodeHeaders,
   filterProxyHeaders,
@@ -664,10 +663,9 @@ const UNAUTHORIZED_BODY = {
   },
 };
 
-// 豁免路径：模型列表（匿名可访问）、健康检查、根路径、指标页外壳（页面本身不含数据，
-// 数据接口 /stats 仍需认证）。
+// 豁免路径：模型列表（匿名可访问）、健康检查、根路径。
 function isAuthExemptPath(pathname) {
-  return pathname === '/v1/models' || pathname === '/health' || pathname === '/' || pathname === '/dashboard';
+  return pathname === '/v1/models' || pathname === '/health' || pathname === '/';
 }
 
 function sendUnauthorized(res) {
@@ -1754,10 +1752,6 @@ const server = http.createServer(async (req, res) => {
     } else if (url.pathname === '/stats' && req.method === 'GET') {
       // 指标数据接口：需要认证（复用全局 user_ Key 校验），快照仅存内存。
       sendJSON(res, 200, metrics.snapshot());
-    } else if (url.pathname === '/dashboard' && req.method === 'GET') {
-      // 指标页面外壳：无数据，Key 由页面弹窗输入后保存在浏览器本地。
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(DASHBOARD_HTML);
     } else if (url.pathname === '/health' || url.pathname === '/') {
       handleHealth(req, res);
     } else if (isCommandCodeNativePath(url.pathname)) {

@@ -252,7 +252,7 @@ API Key 的用法：客户端每次请求带 `Authorization: Bearer user_xxx`（
 ### 3.5 安全与对外暴露
 
 - 防火墙只放行必要端口；生产建议在前面挂 nginx/Caddy 反代 + TLS，代理只监听 `127.0.0.1`（`HOST=127.0.0.1`）。
-- 除 `/health`、`/`、`/v1/models`、`/dashboard` 外，所有路径（含原生透传 `/alpha/*` 等）都要求 Authorization 头，不带 Key 的请求一律 401。
+- 除 `/health`、`/`、`/v1/models` 外，所有路径（含原生透传 `/alpha/*` 等）都要求 Authorization 头，不带 Key 的请求一律 401。
 - 流式响应依赖禁用缓冲：nginx 需 `proxy_buffering off;`（或依赖代理发送的 `X-Accel-Buffering: no`）；Caddy 默认即可。
 - 原生透传入口（`/alpha/*`、`/beta/*`、`/internal/*`、`/provider/*`）会透传 Cookie/OAuth 头，生产环境建议给它用**独立域名**，避免与其他 Web 应用共享 Cookie 边界（README_zh.md 有详细说明）。
 - 调试日志可能包含请求结构，切勿把日志目录公开；日志中不应出现 API Key（代码已做脱敏，改动日志相关代码时保持这一约束）。
@@ -262,7 +262,8 @@ API Key 的用法：客户端每次请求带 `Authorization: Bearer user_xxx`（
 ```bash
 curl http://127.0.0.1:3050/health
 # 应返回 OK；随后用真实 Key 跑一次 2.4 节的最小生成请求，
-# 并打开 http://<域名>/dashboard 输入 Key 查看指标是否开始计数。
+# 再带 Key 请求 /stats 确认指标已开始计数：
+curl http://127.0.0.1:3050/stats -H "Authorization: Bearer user_xxxxxxxxx"
 ```
 
 之后每周回到第 1 节做版本对齐即可。
