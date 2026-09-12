@@ -287,6 +287,12 @@ test('健康检查和认证错误返回正确状态', async () => {
   assert.equal(health.status, 200);
   assert.equal(await health.text(), 'OK');
 
+  // 根路径固定 403：不提供任何内容，探针/扫描直接拒绝。
+  const root = await fetch(`${proxyUrl}/`);
+  assert.equal(root.status, 403);
+  const rootBody = await root.json();
+  assert.equal(rootBody.error.type, 'permission_error');
+
   const unauthorized = await fetch(`${proxyUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

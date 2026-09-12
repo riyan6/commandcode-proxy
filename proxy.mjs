@@ -658,7 +658,7 @@ const UNAUTHORIZED_BODY = {
   },
 };
 
-// 豁免路径：模型列表（匿名可访问）、健康检查、根路径。
+// 豁免路径：模型列表（匿名可访问）、健康检查、根路径（固定 403，不暴露任何内容）。
 function isAuthExemptPath(pathname) {
   return pathname === '/v1/models' || pathname === '/health' || pathname === '/';
 }
@@ -1706,7 +1706,10 @@ const server = http.createServer(async (req, res) => {
       await handleMessages(req, res);
     } else if (url.pathname === '/v1/models' && req.method === 'GET') {
       await handleModels(req, res);
-    } else if (url.pathname === '/health' || url.pathname === '/') {
+    } else if (url.pathname === '/') {
+      // 根路径不提供任何内容：探针/扫描直接 403，避免与健康检查混淆。
+      sendJSON(res, 403, { error: { message: 'Forbidden', type: 'permission_error' } });
+    } else if (url.pathname === '/health') {
       handleHealth(req, res);
     } else if (isCommandCodeNativePath(url.pathname)) {
       await handleNativeCommandCode(req, res, url);
