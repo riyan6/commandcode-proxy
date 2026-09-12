@@ -4,7 +4,7 @@
 
 A reverse proxy that converts Command Code API to OpenAI / Anthropic compatible endpoints. Node.js ESM with zero external dependencies.
 
-Built by analyzing the local `command-code@1.47.0` CLI bundle and aligning the Command Code API request protocol.
+Built by analyzing the local `command-code@1.53.1` CLI bundle and aligning the Command Code API request protocol.
 
 > Maintenance guide: [MAINTENANCE.md](MAINTENANCE.md) — weekly version-alignment prompt, VPS update flow, and first-time deployment.
 
@@ -64,7 +64,7 @@ commandcode/
 | `port` | `3050` | Listen port |
 | `host` | `0.0.0.0` | Listen address |
 | `apiBase` | `https://api.commandcode.ai` | CC API base URL |
-| `protocolVersion` | `1.47.0` | Protocol implementation baseline; also sent as the `x-command-code-version` header |
+| `protocolVersion` | `1.53.1` | Protocol implementation baseline; also sent as the `x-command-code-version` header |
 | `cliEnvironment` | `production` | `x-cli-environment` header |
 | `userAgent` | `cli` | CLI User-Agent |
 | `projectSlug` | `""` (per-session fake slug) | `x-project-slug` header |
@@ -123,7 +123,7 @@ OpenAI Chat Completions compatible. Supports streaming, non-streaming, tool call
 | `tool_choice` | No | Accepted but not sent upstream; the CLI envelope does not contain this field |
 | `parallel_tool_calls` | No | Accepted but not sent upstream; the CLI envelope does not contain this field |
 
-To keep the upstream envelope identical to the 1.47.0 CLI, `top_p`, `stop`, `user`, `presence_penalty`, `frequency_penalty`, `response_format`, `tool_choice`, and `parallel_tool_calls` are not forwarded upstream and therefore do not affect generation.
+To keep the upstream envelope identical to the 1.53.1 CLI, `top_p`, `stop`, `user`, `presence_penalty`, `frequency_penalty`, `response_format`, `tool_choice`, and `parallel_tool_calls` are not forwarded upstream and therefore do not affect generation.
 
 **Simple request:**
 ```json
@@ -221,7 +221,7 @@ Anthropic Messages API compatible endpoint. Supports streaming, non-streaming, a
 | Message content | `content` array (text/tool_use/tool_result) | Auto-mapped to corresponding roles |
 | Tool results | `tool_result` blocks in `user` messages | Auto-converted to `role: "tool"` |
 | Tool definitions | `input_schema` | Auto-mapped to `parameters` |
-| `tool_choice` | `{type:"auto"/"any"/"tool"}` | Accepted but omitted upstream to preserve the 1.47.0 CLI envelope |
+| `tool_choice` | `{type:"auto"/"any"/"tool"}` | Accepted but omitted upstream to preserve the 1.53.1 CLI envelope |
 | Reasoning | `thinking.budget_tokens` | Auto-mapped to `reasoning_effort` (≥100000→max, ≥30000→xhigh, ≥10000→high, ≥5000→medium, else low); `adaptive` mode passes `effort` through |
 | Stop reason | `end_turn`/`max_tokens`/`tool_use` | Auto-mapped to `stop`/`length`/`tool_calls` |
 | Token usage | `input_tokens`/`output_tokens` + cache | Passed through, cache fields mapped to Anthropic format |
@@ -283,14 +283,14 @@ Proxy-side runtime metrics (for token usage see the official Command Code dashbo
 
 ### Native Command Code Pass-Through
 
-The proxy forwards native Command Code API requests on the same path. `/alpha/*`, `/provider/*`, and the `/beta/*` and `/internal/*` namespaces declared by the 1.47.0 bundle are sent only to the configured `apiBase`. Other paths are not forwarded, so this is not an arbitrary URL proxy.
+The proxy forwards native Command Code API requests on the same path. `/alpha/*`, `/provider/*`, and the `/beta/*` and `/internal/*` namespaces declared by the 1.53.1 bundle are sent only to the configured `apiBase`. Other paths are not forwarded, so this is not an arbitrary URL proxy.
 
 Native requests preserve the HTTP method, query, raw body bytes, authentication/OAuth/cookie headers, upstream status, response headers, and response stream. Only hop-by-hop headers such as `Host`, `Connection`, and `Transfer-Encoding` are removed; 3xx responses are not followed automatically. The 10MB request limit still applies. Use a dedicated hostname for the native endpoint in production so it does not share cookies with unrelated web applications.
 
 ```bash
 curl http://127.0.0.1:3050/alpha/whoami \
   -H "Authorization: Bearer user_xxxxxxxxx" \
-  -H "x-command-code-version: 1.47.0"
+  -H "x-command-code-version: 1.53.1"
 ```
 
 `POST /alpha/generate` returns the native newline-delimited JSON stream without converting it to OpenAI SSE. Sandbox real-time connections use a WebSocket tunnel on the same path, such as `ws://127.0.0.1:3050/alpha/sandbox/stream/...`. External OAuth, npm updates, telemetry, and user-configured MCP origins are outside the Command API origin and are not proxied by this endpoint.
@@ -405,18 +405,19 @@ claude
 
 ## Anti-Detection
 
-Based on analysis of the local `command-code@1.47.0` bundle (function-level analysis) and captured 1.32.1 CLI traffic:
+Based on analysis of the local `command-code@1.53.1` bundle (function-level analysis) and captured 1.32.1 CLI traffic:
 
 | Mechanism | Implementation |
 |-----------|---------------|
 | **Per-Key Session** | One session per API key, 12h expiry + 1h random jitter |
-| **Protocol Baseline / Version Header** | Request envelope and `x-command-code-version` are both pinned to `1.47.0` (`protocolVersion`); no longer follows npm latest, so the advertised version always matches the implemented protocol |
+| **Protocol Baseline / Version Header** | Request envelope and `x-command-code-version` are both pinned to `1.53.1` (`protocolVersion`); no longer follows npm latest, so the advertised version always matches the implemented protocol |
 | **CLI Envelope** | config/memory/taste/skills/permissionMode/mode/params/threadId |
-| **Tools & Images** | 1.47.0 wire format for tools, base64 images and mimeType; tool-result backfills `toolName`, and `tool_search` in assistant history is renamed to `search_tools` per the CLI rule |
-| **Stream Continuation** | Repeats `pause_turn` requests up to 5 times on the same thread (matching the 1.47.0 retry cap) |
+| **Prompt Caching** | 1.53.1 sends the system prompt as sections (`toWireSystem`) with `cache_control: {type:"ephemeral"}` on cached sections; the proxy emits the caller's system prompt as a single cached section |
+| **Tools & Images** | 1.53.1 wire format for tools, base64 images and mimeType; tool-result backfills `toolName`, and `tool_search` in assistant history is renamed to `search_tools` per the CLI rule |
+| **Stream Continuation** | Repeats `pause_turn` requests up to 5 times on the same thread (matching the 1.53.1 retry cap) |
 | **Server Tool Results** | 1.31.0 `tool-result` events (provider-executed) are silently skipped for OpenAI/Anthropic clients |
 | **Upstream Abort** | 1.31.0 `abort` event treated as a normal completion |
-| **Stable Fingerprint** | Uses the 1.47.0 salted fingerprint algorithm (`command-code:device-fingerprint:v1` salt over machineId/MAC signals); the signal values are derived per API key and CPU, core count, and memory stay coherent across restarts |
+| **Stable Fingerprint** | Uses the 1.53.1 salted fingerprint algorithm (`command-code:device-fingerprint:v1` salt over machineId/MAC signals); the signal values are derived per API key and CPU, core count, and memory stay coherent across restarts |
 | **OpenTelemetry** | One trace ID per request round, with a distinct span ID for each upstream call |
 | **Environment** | `x-cli-environment: production` |
 | **Workspace Identity** | A stable Git workspace is derived per API key; `workingDir` and `x-project-slug` always identify the same project |
@@ -458,6 +459,9 @@ Based on analysis of the local `command-code@1.47.0` bundle (function-level anal
     "model": "deepseek/deepseek-v4-flash",
     "messages": [...],
     "tools": [],
+    "system": [
+      { "type": "text", "text": "You are a coding assistant.", "cache_control": { "type": "ephemeral" } }
+    ],
     "max_tokens": 64000,
     "stream": true,
     "reasoning_effort": "max"
@@ -465,6 +469,8 @@ Based on analysis of the local `command-code@1.47.0` bundle (function-level anal
   "threadId": "<uuid>"
 }
 ```
+
+The `system` field follows the 1.53.1 sections format (`toWireSystem`): an array of text blocks where cached sections carry `cache_control: {type:"ephemeral"}`. It is omitted entirely when the caller sends no system prompt.
 
 When the client does not provide a valid `threadId`, the proxy creates one UUID per API key session. The same UUID is sent as both `threadId` and `x-session-id`, matching the CLI.
 

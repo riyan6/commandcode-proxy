@@ -2,7 +2,8 @@ import crypto from 'crypto';
 import os from 'os';
 import { existsSync } from 'fs';
 
-// command-code@1.47.0 的设备指纹算法（dist/cli.mjs 的 buildMachineFingerprint）：
+// command-code@1.53.1 的设备指纹算法（dist/cli.mjs 的 buildMachineFingerprint，
+// 与 1.47.0 逐字段比对无变化）：
 // 1. hashSignal(value) = sha256(盐 + "\0" + value.trim().toLowerCase())，空值返回 undefined；
 // 2. thumbmark = sha256(盐 + "\0machine\0" + parts.join("|"))，
 //    parts = [machineId, mac 列表逗号拼接, machineId 为空时的 hostname, machineId 为空时的 cpuModel]。
@@ -13,7 +14,7 @@ function sha256(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
-// 1.47.0 的 hashSignal：trim + lowercase 后加盐哈希；空信号返回 undefined，
+// 1.53.1 的 hashSignal（与 1.47.0 相同）：trim + lowercase 后加盐哈希；空信号返回 undefined，
 // JSON 序列化时会省略该字段，与真实 CLI 空 machine-id 时的载荷形状一致。
 function hashSignal(value) {
   const trimmed = String(value ?? '').trim();
@@ -28,7 +29,7 @@ function detectContainer() {
 }
 
 function getTimezone() {
-  // 1.47.0 读不到时区时会省略字段，这里返回空串交给统一处理。
+  // 1.53.1 读不到时区时会省略字段，这里返回空串交给统一处理。
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; }
 }
 
@@ -97,7 +98,7 @@ function selectDeviceProfile(seed, platform, arch, isContainer) {
 
 // ── 合成原始信号 ─────────────────────────────────────
 // 代理读不到调用方本机的真实 machine-id / MAC / 用户名，这里按 API Key
-// 派生一套稳定的合成原始信号，再套用 1.47.0 的真实指纹算法，
+// 派生一套稳定的合成原始信号，再套用 1.53.1 的真实指纹算法，
 // 使 thumbmark 和 components 的生成路径与真实 CLI 完全一致。
 const SYNTHETIC_OUIS = ['8c:16:45', 'a4:5e:60', 'f0:18:98', '3c:22:fb', 'd0:03:4b', '00:1a:2b'];
 const SYNTHETIC_USERS = ['alex', 'chen', 'dev', 'jordan', 'lee', 'morgan', 'sam', 'taylor'];
@@ -164,7 +165,7 @@ export function generateFingerprint(apiKey = '', { salt = '' } = {}) {
   const device = selectDeviceProfile(seed, platform, arch, isContainer);
   const raw = syntheticSignals(seed, platform);
 
-  // 1.47.0 的 machine thumbmark：MAC 去重小写排序后与 machineId 拼接参与哈希；
+  // 1.53.1 的 machine thumbmark（与 1.47.0 相同）：MAC 去重小写排序后与 machineId 拼接参与哈希；
   // 只有 machineId 缺失时才回退用 hostname / cpuModel，避免设备字段互相稀释。
   const macs = [...new Set(raw.macAddresses.map(mac => mac.toLowerCase()))].filter(Boolean).sort();
   const machineIdTrimmed = raw.machineId.trim();
@@ -177,7 +178,7 @@ export function generateFingerprint(apiKey = '', { salt = '' } = {}) {
 
   const thumbmark = sha256(`${SIGNAL_SALT}\0machine\0${parts.join('|') || 'unknown'}`);
 
-  // components 的字段顺序与 1.47.0 的 buildMachineFingerprint 保持一致。
+  // components 的字段顺序与 1.53.1 的 buildMachineFingerprint 保持一致。
   const components = {
     machineIdHash: hashSignal(raw.machineId),
     macHashes: macs.map(mac => hashSignal(mac)).filter(Boolean),

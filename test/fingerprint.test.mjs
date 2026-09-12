@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { generateFingerprint } from '../src/fingerprint.mjs';
 
-test('指纹字段与 1.47.0 CLI 对齐并按 API Key 稳定', () => {
+test('指纹字段与 1.53.1 CLI 对齐并按 API Key 稳定', () => {
   const first = generateFingerprint('key-a', { salt: 'test-salt' });
   const second = generateFingerprint('key-a', { salt: 'test-salt' });
   const other = generateFingerprint('key-b', { salt: 'test-salt' });
@@ -18,12 +18,12 @@ test('指纹字段与 1.47.0 CLI 对齐并按 API Key 稳定', () => {
   assert.equal(typeof first.components.isContainer, 'boolean');
 });
 
-test('thumbmark 使用 1.47.0 的加盐机器信号哈希，而非 components JSON 哈希', () => {
+test('thumbmark 使用 1.53.1 的加盐机器信号哈希，而非 components JSON 哈希', () => {
   const { thumbmark, components } = generateFingerprint('key-algo', { salt: 'test-salt' });
 
   assert.match(thumbmark, /^[0-9a-f]{64}$/);
-  // 1.32.1 之前的实现把 components 整体 JSON 序列化后哈希；1.47.0 已改为
-  // “盐 + \0machine\0 + machineId|mac 列表”的加盐哈希，两者必须不相等。
+  // 1.32.1 之前的实现把 components 整体 JSON 序列化后哈希；1.47.0 起改为
+  // “盐 + \0machine\0 + machineId|mac 列表”的加盐哈希（1.53.1 未变），两者必须不相等。
   const jsonHash = crypto.createHash('sha256')
     .update(JSON.stringify(components))
     .digest('hex');
@@ -37,7 +37,7 @@ test('thumbmark 使用 1.47.0 的加盐机器信号哈希，而非 components JS
   assert.match(saltProbe, /^[0-9a-f]{64}$/);
 });
 
-test('components 字段顺序与 1.47.0 buildMachineFingerprint 一致', () => {
+test('components 字段顺序与 1.53.1 buildMachineFingerprint 一致', () => {
   const { components } = generateFingerprint('key-order', { salt: 'test-salt' });
 
   assert.deepEqual(Object.keys(components), [

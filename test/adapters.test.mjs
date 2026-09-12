@@ -10,7 +10,7 @@ import {
   projectSlugFromWorkspace,
 } from '../src/adapters.mjs';
 
-test('请求体与 command-code 1.47.0 的 CLI 信封和工具格式一致', () => {
+test('请求体与 command-code 1.53.1 的 CLI 信封和工具格式一致', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [
@@ -47,7 +47,10 @@ test('请求体与 command-code 1.47.0 的 CLI 信封和工具格式一致', () 
   assert.equal(body.skills, null);
   assert.equal(body.mode, 'agent');
   assert.equal(body.threadId, '123e4567-e89b-12d3-a456-426614174000');
-  assert.equal(body.params.system, '你是助手');
+  // 1.53.1 的主对话 system 为分节数组：单节且携带 cache_control ephemeral。
+  assert.deepEqual(body.params.system, [
+    { type: 'text', text: '你是助手', cache_control: { type: 'ephemeral' } },
+  ]);
   assert.equal(body.params.tools[0].name, 'lookup');
   assert.equal(body.params.tools[0].type, undefined);
   assert.equal(body.params.messages[0].content[1].mimeType, 'image/png');
@@ -93,7 +96,9 @@ test('兼容 Agent 的 developer 和旧式 function 消息格式', () => {
     ],
   });
 
-  assert.equal(body.params.system, '你是一个代码助手');
+  assert.deepEqual(body.params.system, [
+    { type: 'text', text: '你是一个代码助手', cache_control: { type: 'ephemeral' } },
+  ]);
   assert.equal(body.mode, 'agent');
   assert.deepEqual(body.params.messages.map(message => message.role), ['user', 'assistant', 'tool']);
   assert.ok(body.params.messages.every(message => Array.isArray(message.content)));
@@ -138,7 +143,7 @@ test('1.31.0 tool-result 找不到对应工具名时回填 unknown', () => {
   assert.equal(toolResults[0].content[0].toolName, 'unknown');
 });
 
-test('params 键序对齐 1.47.0：system 位于 tools 与 max_tokens 之间', () => {
+test('params 键序对齐 1.53.1：system 位于 tools 与 max_tokens 之间', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [
@@ -148,7 +153,7 @@ test('params 键序对齐 1.47.0：system 位于 tools 与 max_tokens 之间', (
     max_tokens: 128,
   });
 
-  // JSON 键序是请求关联特征，必须与 1.47.0 的 buildGenerateBody 一致。
+  // JSON 键序是请求关联特征，必须与 1.53.1 的 buildGenerateBody 一致。
   assert.deepEqual(Object.keys(body.params), [
     'model',
     'messages',
@@ -193,7 +198,36 @@ test('params 键序对齐 1.47.0：system 位于 tools 与 max_tokens 之间', (
   ]);
 });
 
-test('历史消息中的 tool_search 按 1.47.0 规则重命名为 search_tools', () => {
+test('1.53.1 system 分节形状与信封顶层键序保持关联特征', () => {
+  const body = buildCcRequest({
+    model: 'demo-model',
+    messages: [
+      { role: 'system', content: '系统提示' },
+      { role: 'user', content: 'hi' },
+    ],
+  }, { threadId: '123e4567-e89b-12d3-a456-426614174000' });
+
+  // 主对话 system 是分节数组：唯一一节即末节，不追加 \n，携带 cache_control ephemeral
+  //（对齐 1.53.1 toWireSystem；代理没有 memory/taste 内容，不伪造第二节）。
+  assert.deepEqual(body.params.system, [
+    { type: 'text', text: '系统提示', cache_control: { type: 'ephemeral' } },
+  ]);
+
+  // 1.53.1 信封新增的 promptCache 仅内部子调用使用（"off"），主对话为 undefined，
+  // JSON 序列化后省略——顶层键序必须与 1.47.0 时代保持一致。
+  assert.deepEqual(Object.keys(body), [
+    'config',
+    'memory',
+    'taste',
+    'skills',
+    'permissionMode',
+    'threadId',
+    'mode',
+    'params',
+  ]);
+});
+
+test('历史消息中的 tool_search 按 CLI 规则重命名为 search_tools（1.53.1 未变）', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [
@@ -287,7 +321,7 @@ test('OpenAI 路径的 reasoning_effort 原样透传到 CC 请求体', () => {
   assert.equal(maxBody.params.reasoning_effort, 'max');
 });
 
-test('1.47.0 请求信封过滤 OpenAI 专属可选参数', () => {
+test('1.53.1 请求信封过滤 OpenAI 专属可选参数', () => {
   const body = buildCcRequest({
     model: 'demo-model',
     messages: [{ role: 'user', content: 'hi' }],
@@ -349,7 +383,10 @@ test('Claude Code 发送 role:system 消息时合并到 params.system', () => {
   assert.deepEqual(openai.messages.map(m => m.role), ['system', 'user', 'system']);
 
   const cc = buildCcRequest(openai, { mode: 'agent', permissionMode: 'standard' });
-  assert.equal(cc.params.system, '顶层系统提示\n消息里的系统提示');
+  // 多条 system 文本合并为单节后仍走 1.53.1 的分节数组形状。
+  assert.deepEqual(cc.params.system, [
+    { type: 'text', text: '顶层系统提示\n消息里的系统提示', cache_control: { type: 'ephemeral' } },
+  ]);
   // 系统提示不进 wire messages。
   assert.deepEqual(cc.params.messages.map(m => m.role), ['user']);
 });

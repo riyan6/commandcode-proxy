@@ -87,7 +87,7 @@ function buildWireMessages(messages) {
   // 1.31.0 的 toWireMessages 会记录 toolCallId → toolName 映射，
   // 后续 tool-result 用该映射回填工具名，找不到时用 "unknown"。
   const toolNameById = new Map();
-  // 1.47.0 的 toWireToolName：历史消息里的 tool_search 统一以 search_tools 上送。
+  // 1.53.1 的 toWireToolName（与 1.47.0 相同）：历史消息里的 tool_search 统一以 search_tools 上送。
   const toWireToolName = name => (name === 'tool_search' ? 'search_tools' : name);
 
   for (const message of messages) {
@@ -177,6 +177,17 @@ function buildWireMessages(messages) {
   }
 
   return wireMessages;
+}
+
+// 对齐 command-code@1.53.1 的 toWireSystem：system 分节序列化，
+// 非末段文本追加 \n，带 cache 标记的段附加 cache_control ephemeral（1.50.0 缓存改进）。
+function toWireSystem(sections = []) {
+  const lastIndex = sections.length - 1;
+  return sections.map((section, index) => ({
+    type: 'text',
+    text: index < lastIndex ? `${section.text}\n` : section.text,
+    ...(section.cache ? { cache_control: { type: 'ephemeral' } } : {}),
+  }));
 }
 
 function buildServerConfig(serverConfig = {}) {
@@ -301,8 +312,11 @@ export function buildCcRequest(openaiReq, {
   );
   const systemPrompt = systemMsgs.map(message => textFromContent(message.content)).filter(Boolean).join('\n');
 
-  // 1.47.0 的 params 键序：model → messages → tools → system → max_tokens → stream，
+  // 1.53.1 的 params 键序：model → messages → tools → system → max_tokens → stream，
   // temperature / reasoning_effort 按需附加在末尾；键序本身也是关联特征，不能打乱。
+  // 1.50.0 起（bundle 实测于 1.53.1）主对话的 system 为分节数组：
+  // 首段是基础系统提示并携带 cache_control，代理没有 memory/taste/skills 内容，
+  // 因此只发单节，形状与真实 CLI 的 toWireSystem 输出一致。
   const body = {
     config: buildServerConfig(serverConfig),
     memory: null,
@@ -315,8 +329,8 @@ export function buildCcRequest(openaiReq, {
       model: model || 'deepseek/deepseek-v4-flash',
       messages: buildWireMessages(messages),
       tools: toWireTools(tools || []),
-      // 1.47.0 中 system 恒位于 tools 与 max_tokens 之间；无系统提示时整体省略。
-      ...(systemPrompt ? { system: systemPrompt } : {}),
+      // 1.53.1 中 system 恒位于 tools 与 max_tokens 之间；无系统提示时整体省略。
+      ...(systemPrompt ? { system: toWireSystem([{ text: systemPrompt, cache: true }]) } : {}),
       max_tokens: max_tokens ?? 64000,
       stream: true,
     },

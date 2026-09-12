@@ -38,7 +38,7 @@ import {
 
 const CFG = loadConfig();
 
-// 请求体和字段转换固定按 command-code@1.47.0 实现，避免协议随上游版本漂移。
+// 请求体和字段转换固定按 command-code@1.53.1 实现，避免协议随上游版本漂移。
 // 发送给上游的 x-command-code-version 头与实现基线保持一致（protocolVersion），
 // 不再跟随 npm latest，避免“头版本新但特性旧”被后端识别出代理伪装。
 const CC_VERSION = CFG.protocolVersion;
@@ -888,7 +888,7 @@ async function handleChatCompletions(req, res) {
             }
           }
 
-          // 1.47.0 遇到 pause_turn 时最多继续请求 5 次（bh=5），并复用同一线程。
+          // 1.53.1 遇到 pause_turn 时最多继续请求 5 次（bundle 常量 Ph=5），并复用同一线程。
           if (translator.shouldContinue && continuationCount < 5 && !aborted) {
             continuationCount += 1;
             translator.beginContinuation();

@@ -240,7 +240,7 @@ docker compose ps                    # 等待 healthy
 | `PORT` / `port` | `3050` | 监听端口 |
 | `HOST` / `host` | `0.0.0.0` | 监听地址 |
 | `apiBase` | `https://api.commandcode.ai` | 上游地址，一般不需要改 |
-| `protocolVersion` | `1.47.0` | 协议基线 = `x-command-code-version` 头，随每周对齐更新 |
+| `protocolVersion` | `1.53.1` | 协议基线 = `x-command-code-version` 头，随每周对齐更新 |
 | `mode` | `agent` | 请求模式（agent/learning/title-gen 等，白名单见 src/config.mjs） |
 | `permissionMode` | `standard` | 权限模式 |
 | `LOG_FILE` | 空 | 设为文件路径后开启落盘日志 |

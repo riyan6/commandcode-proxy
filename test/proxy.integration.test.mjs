@@ -561,7 +561,10 @@ test('OpenAI 流式工具调用和参数透传正常', async () => {
   assert.equal(lastGenerateBody.skills, null);
   assert.equal(lastGenerateBody.memory, null);
   assert.equal(lastGenerateBody.taste, null);
-  assert.equal(lastGenerateBody.params.system, '你是一个可靠的工具助手');
+  // 1.53.1 主对话的 system 为分节数组（单节 + cache_control ephemeral）。
+  assert.deepEqual(lastGenerateBody.params.system, [
+    { type: 'text', text: '你是一个可靠的工具助手', cache_control: { type: 'ephemeral' } },
+  ]);
   assert.deepEqual(lastGenerateBody.params.messages.map(message => message.role), ['user']);
   assert.ok(lastGenerateBody.params.messages.every(message => Array.isArray(message.content)));
   assert.equal(lastGenerateBody.config.environment, process.platform);
@@ -592,7 +595,7 @@ test('OpenAI 流式工具调用和参数透传正常', async () => {
   assert.equal(lastFingerprintHeaders['x-taste-learning'], undefined);
   assert.equal(lastLifecycleBody.eventType, 'cli_session_exists');
   assert.match(lastLifecycleBody.metadata.sessionId, /^sess_[0-9a-f]{16}$/);
-  assert.equal(lastLifecycleBody.metadata.cliVersion, '1.47.0');
+  assert.equal(lastLifecycleBody.metadata.cliVersion, '1.53.1');
   assert.equal(lastLifecycleHeaders['x-project-slug'], undefined);
 });
 
